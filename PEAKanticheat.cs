@@ -1,6 +1,8 @@
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
+using ExitGames.Client.Photon;
+using static AntiCheatEvents;
 using HarmonyLib;
 using Photon.Pun;
 using Photon.Realtime;
@@ -16,7 +18,7 @@ using Hashtable = ExitGames.Client.Photon.Hashtable;
 
 namespace AntiCheatMod
 {
-    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anti-Cheat", "1.0.0")]
+    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.1.0")]
     public class AntiCheatPlugin : BaseUnityPlugin, IConnectionCallbacks, IMatchmakingCallbacks, IInRoomCallbacks
     {
         public static new ManualLogSource Logger;
@@ -26,6 +28,7 @@ namespace AntiCheatMod
         // Config entries
         private static ConfigEntry<bool> ShowVisualLogs;
         private static ConfigEntry<bool> CheckSteamNames;
+        private static ConfigEntry<bool> AutoPunishCheaters;
         public static ConfigEntry<bool> VerboseRPCLogging;
 
         // Connection log for visual messages
@@ -34,6 +37,9 @@ namespace AntiCheatMod
 
         // Track soft-locked players for current session only
         private static readonly HashSet<int> _softLockedPlayers = new HashSet<int>();
+        // Track player identities
+        private static readonly List<PlayerIdentity> _knownPlayerIdentities = new List<PlayerIdentity>();
+
 
         // Reflection methods/fields
         private static MethodInfo _getColorTagMethod;
@@ -45,23 +51,29 @@ namespace AntiCheatMod
             Instance = this;
             Logger = base.Logger;
 
-            Config = new ConfigFile(Path.Combine(Paths.ConfigPath, "com.yourname.anticheat.cfg"), true);
+            // Initialize config
+            Config = new ConfigFile(Path.Combine(Paths.ConfigPath, "com.hiccup444.PEAKanticheat.cfg"), true);
             ShowVisualLogs = Config.Bind("General", "ShowVisualLogs", true, "Show anti-cheat messages in the connection log");
             CheckSteamNames = Config.Bind("General", "CheckSteamNames", true, "Check if Photon names match Steam names");
+            AutoPunishCheaters = Config.Bind("General", "AutoPunishCheaters", true, "Automatically soft-lock detected cheaters");
             VerboseRPCLogging = Config.Bind("Debug", "VerboseRPCLogging", false, "Log all RPC calls for debugging");
 
-            Logger.LogInfo("Anti-cheat protection active!");
+            Logger.LogInfo("[PEAKAntiCheat] Protection active!");
 
-            var harmony = new Harmony("com.yourname.anticheat");
+            // Apply Harmony patches
+            var harmony = new Harmony("com.hiccup444.PEAKanticheat");
             harmony.PatchAll();
 
+            // Subscribe to Photon callbacks
             PhotonNetwork.AddCallbackTarget(this);
 
+            // Start checking for cheat mods
             StartCoroutine(CheckPlayersForCheats());
         }
 
         private void Update()
         {
+            // Process queued visual logs
             while (_queuedLogs.Count != 0)
             {
                 var log = _queuedLogs.Peek();
@@ -88,6 +100,7 @@ namespace AntiCheatMod
                 _connectionLog = FindObjectOfType<PlayerConnectionLog>();
                 if (_connectionLog)
                 {
+                    // Cache reflection methods and fields
                     var logType = _connectionLog.GetType();
                     _getColorTagMethod = logType.GetMethod("GetColorTag", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                     _addMessageMethod = logType.GetMethod("AddMessage", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
@@ -112,6 +125,7 @@ namespace AntiCheatMod
             {
                 StringBuilder sb = new StringBuilder(message);
 
+                // Get color fields
                 var joinedColorField = _connectionLog.GetType().GetField("joinedColor", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                 var leftColorField = _connectionLog.GetType().GetField("leftColor", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                 var userColorField = _connectionLog.GetType().GetField("userColor", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
@@ -122,6 +136,7 @@ namespace AntiCheatMod
                     var leftColor = leftColorField.GetValue(_connectionLog);
                     var userColor = userColorField.GetValue(_connectionLog);
 
+                    // Use reflection to call GetColorTag
                     string joinedColorTag = (string)_getColorTagMethod.Invoke(_connectionLog, new object[] { joinedColor });
                     string leftColorTag = (string)_getColorTagMethod.Invoke(_connectionLog, new object[] { leftColor });
                     string userColorTag = (string)_getColorTagMethod.Invoke(_connectionLog, new object[] { userColor });
@@ -142,8 +157,10 @@ namespace AntiCheatMod
                     }
                 }
 
+                // Use reflection to call AddMessage
                 _addMessageMethod.Invoke(_connectionLog, new object[] { message });
 
+                // Handle sound effects
                 var sfxJoinField = _connectionLog.GetType().GetField("sfxJoin", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                 var sfxLeaveField = _connectionLog.GetType().GetField("sfxLeave", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
 
@@ -178,23 +195,64 @@ namespace AntiCheatMod
 
         public static void SoftLockPlayer(Photon.Realtime.Player cheater, string reason)
         {
+            // Only work if we're master client
             if (!PhotonNetwork.IsMasterClient)
                 return;
 
+            // Never soft-lock ourselves
             if (cheater.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
             {
                 Logger.LogInfo($"Not soft-locking local player");
                 return;
             }
 
+            // Check if already soft-locked
             if (_softLockedPlayers.Contains(cheater.ActorNumber))
             {
                 return;
             }
 
             Logger.LogWarning($"CHEATER DETECTED: {cheater.NickName} - Reason: {reason}");
+            LogVisually($"{{userColor}}{cheater.NickName}</color> {{leftColor}}detected cheating - {reason}</color>", false, false, true);
+
+            CSteamID cheaterSteamID = CSteamID.Nil;
+
+            var identity = _knownPlayerIdentities.Find(p => p.ActorNumber == cheater.ActorNumber);
+            if (identity != null)
+            {
+                cheaterSteamID = identity.SteamID;
+                Logger.LogWarning($"[SoftLock] Found identity for Actor #{cheater.ActorNumber}: PhotonName={identity.PhotonName}, SteamID={cheaterSteamID}");
+
+                if (cheaterSteamID == CSteamID.Nil)
+                {
+                    Logger.LogWarning($"[SoftLock] WARNING: Stored SteamID is NIL for {identity.PhotonName}. This likely means GetPlayerSteamID() failed during initial join.");
+                }
+            }
+            else
+            {
+                Logger.LogWarning($"[SoftLock] No identity found for Actor #{cheater.ActorNumber}, attempting fallback SteamID lookup...");
+                cheaterSteamID = GetPlayerSteamID(cheater);
+
+                if (cheaterSteamID == CSteamID.Nil)
+                {
+                    Logger.LogWarning($"[SoftLock] Fallback GetPlayerSteamID() also returned NIL for {cheater.NickName} (#{cheater.ActorNumber}). Steam/Photon mapping could not be resolved.");
+                }
+            }
+
+            AntiCheatEvents.NotifyCheaterDetected(cheater, reason, cheaterSteamID);
+
+            _softLockedPlayers.Add(cheater.ActorNumber);
+
+            if (!AutoPunishCheaters.Value)
+            {
+                Logger.LogInfo($"Auto-punishment disabled - only logging cheater: {cheater.NickName}");
+                return;
+            }
+
+            // Apply punishment
             LogVisually($"{{userColor}}{cheater.NickName}</color> {{leftColor}}softlocked - {reason}</color>", false, false, true);
 
+            // Try to find AirportCheckInKiosk (only exists in airport scene)
             var kiosk = FindObjectOfType<AirportCheckInKiosk>();
             if (kiosk != null)
             {
@@ -212,8 +270,10 @@ namespace AntiCheatMod
                 }
             }
 
+            // If not in airport scene, use alternative methods
             Logger.LogInfo($"Not in airport scene, using alternative soft-lock for: {cheater.NickName}");
 
+            // Find the cheater's character
             var allCharacters = FindObjectsOfType<Character>();
             Character cheaterCharacter = null;
 
@@ -234,6 +294,7 @@ namespace AntiCheatMod
                 {
                     try
                     {
+                        // Black screen the cheater
                         cheaterPhotonView.RPC("WarpPlayerRPC", RpcTarget.All, new object[]
                         {
                             new Vector3(float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity),
@@ -241,12 +302,14 @@ namespace AntiCheatMod
                         });
                         Logger.LogInfo($"Black screened cheater: {cheater.NickName}");
 
+                        // Try to destroy the cheater's character
                         cheaterPhotonView.OwnershipTransfer = OwnershipOption.Request;
                         cheaterPhotonView.OwnerActorNr = PhotonNetwork.LocalPlayer.ActorNumber;
                         cheaterPhotonView.ControllerActorNr = PhotonNetwork.LocalPlayer.ActorNumber;
                         cheaterPhotonView.RequestOwnership();
                         cheaterPhotonView.TransferOwnership(PhotonNetwork.LocalPlayer);
 
+                        // Wait a frame then destroy
                         Instance.StartCoroutine(DestroyPlayerDelayed(cheaterPhotonView));
 
                         Logger.LogInfo($"Initiated destruction of cheater: {cheater.NickName}");
@@ -265,9 +328,100 @@ namespace AntiCheatMod
             _softLockedPlayers.Add(cheater.ActorNumber);
         }
 
+        private static CSteamID GetPlayerSteamID(Photon.Realtime.Player player)
+        {
+            try
+            {
+                var lobbyHandler = GameHandler.GetService<SteamLobbyHandler>();
+                if (lobbyHandler == null)
+                {
+                    Logger.LogWarning("[GetPlayerSteamID] SteamLobbyHandler not found.");
+                    return CSteamID.Nil;
+                }
+
+                var lobbyHandlerType = lobbyHandler.GetType();
+                var currentLobbyField = lobbyHandlerType.GetField("m_currentLobby", BindingFlags.NonPublic | BindingFlags.Instance);
+
+                if (currentLobbyField == null)
+                {
+                    Logger.LogError("[GetPlayerSteamID] Could not find m_currentLobby field via reflection.");
+                    return CSteamID.Nil;
+                }
+
+                CSteamID currentLobby = (CSteamID)currentLobbyField.GetValue(lobbyHandler);
+                if (currentLobby == CSteamID.Nil)
+                {
+                    Logger.LogWarning("[GetPlayerSteamID] Current Steam lobby is NIL.");
+                    return CSteamID.Nil;
+                }
+
+                int numLobbyMembers = SteamMatchmaking.GetNumLobbyMembers(currentLobby);
+                Logger.LogInfo($"[GetPlayerSteamID] Scanning {numLobbyMembers} Steam lobby members for match with Photon name '{player.NickName}'.");
+
+                // Build Steam name → List<CSteamID>
+                var steamNameToId = new Dictionary<string, List<CSteamID>>();
+
+                for (int i = 0; i < numLobbyMembers; i++)
+                {
+                    CSteamID lobbyMember = SteamMatchmaking.GetLobbyMemberByIndex(currentLobby, i);
+                    string steamName = SteamFriends.GetFriendPersonaName(lobbyMember);
+
+                    Logger.LogInfo($"[GetPlayerSteamID] Found Steam user: Name='{steamName}', SteamID={lobbyMember}");
+
+                    if (!steamNameToId.ContainsKey(steamName))
+                        steamNameToId[steamName] = new List<CSteamID>();
+
+                    steamNameToId[steamName].Add(lobbyMember);
+                }
+
+                if (!steamNameToId.ContainsKey(player.NickName))
+                {
+                    Logger.LogWarning($"[GetPlayerSteamID] No Steam player found with the name '{player.NickName}'. Returning NIL.");
+                    return CSteamID.Nil;
+                }
+
+                var possibleSteamIDs = steamNameToId[player.NickName];
+                Logger.LogInfo($"[GetPlayerSteamID] Found {possibleSteamIDs.Count} Steam players with name '{player.NickName}': {string.Join(", ", possibleSteamIDs)}");
+
+                // Now find all Photon players with the same nickname
+                List<Photon.Realtime.Player> photonPlayersWithSameName = new List<Photon.Realtime.Player>();
+                foreach (var otherPlayer in PhotonNetwork.PlayerList)
+                {
+                    if (otherPlayer.NickName == player.NickName)
+                        photonPlayersWithSameName.Add(otherPlayer);
+                }
+
+                Logger.LogInfo($"[GetPlayerSteamID] Found {photonPlayersWithSameName.Count} Photon players with name '{player.NickName}'.");
+
+                if (photonPlayersWithSameName.Count > possibleSteamIDs.Count)
+                {
+                    Logger.LogWarning($"[GetPlayerSteamID] More Photon players ({photonPlayersWithSameName.Count}) than Steam players ({possibleSteamIDs.Count}) for name '{player.NickName}'. Returning NIL as it's likely spoofed.");
+                    return CSteamID.Nil;
+                }
+
+                // Sort Photon players by ActorNumber for deterministic order
+                photonPlayersWithSameName.Sort((a, b) => a.ActorNumber.CompareTo(b.ActorNumber));
+
+                int index = photonPlayersWithSameName.FindIndex(p => p.ActorNumber == player.ActorNumber);
+                if (index >= 0 && index < possibleSteamIDs.Count)
+                {
+                    Logger.LogInfo($"[GetPlayerSteamID] Matched ActorNumber {player.ActorNumber} to SteamID {possibleSteamIDs[index]} (index {index}).");
+                    return possibleSteamIDs[index];
+                }
+
+                Logger.LogWarning($"[GetPlayerSteamID] Could not find matching ActorNumber for {player.NickName}. Returning first available SteamID: {possibleSteamIDs[0]}");
+                return possibleSteamIDs[0]; // fallback: first Steam ID
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"[GetPlayerSteamID] Exception while resolving Steam ID for {player.NickName}: {ex.Message}");
+                return CSteamID.Nil;
+            }
+        }
+
         private static IEnumerator DestroyPlayerDelayed(PhotonView cheaterPhotonView)
         {
-            yield return new WaitForSeconds(0.1f);
+            yield return new WaitForSeconds(0.1f); // Wait a frame for ownership transfer
             try
             {
                 if (cheaterPhotonView != null && cheaterPhotonView.IsMine)
@@ -288,6 +442,7 @@ namespace AntiCheatMod
             {
                 yield return new WaitForSeconds(5f);
 
+                // Only check if we're master client
                 if (PhotonNetwork.InRoom && PhotonNetwork.IsMasterClient)
                 {
                     foreach (var player in PhotonNetwork.PlayerList)
@@ -298,6 +453,46 @@ namespace AntiCheatMod
             }
         }
 
+        private static List<CSteamID> GetSteamIDsForName(string steamName)
+        {
+            try
+            {
+                var lobbyHandler = GameHandler.GetService<SteamLobbyHandler>();
+                if (lobbyHandler == null)
+                    return new List<CSteamID>();
+
+                var lobbyHandlerType = lobbyHandler.GetType();
+                var currentLobbyField = lobbyHandlerType.GetField("m_currentLobby", BindingFlags.NonPublic | BindingFlags.Instance);
+
+                if (currentLobbyField == null)
+                    return new List<CSteamID>();
+
+                CSteamID currentLobby = (CSteamID)currentLobbyField.GetValue(lobbyHandler);
+                if (currentLobby == CSteamID.Nil)
+                    return new List<CSteamID>();
+
+                int numLobbyMembers = SteamMatchmaking.GetNumLobbyMembers(currentLobby);
+                List<CSteamID> matchingIds = new List<CSteamID>();
+
+                for (int i = 0; i < numLobbyMembers; i++)
+                {
+                    CSteamID lobbyMember = SteamMatchmaking.GetLobbyMemberByIndex(currentLobby, i);
+                    string name = SteamFriends.GetFriendPersonaName(lobbyMember);
+
+                    if (name == steamName)
+                        matchingIds.Add(lobbyMember);
+                }
+
+                return matchingIds;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"Error getting SteamIDs for name {steamName}: {ex.Message}");
+                return new List<CSteamID>();
+            }
+        }
+
+
         private void CheckPlayerForCheatMods(Photon.Realtime.Player player)
         {
             if (player.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
@@ -306,6 +501,44 @@ namespace AntiCheatMod
             if (_softLockedPlayers.Contains(player.ActorNumber))
                 return;
 
+            // Record the player's Steam ID when they first join
+            if (!_knownPlayerIdentities.Exists(p => p.ActorNumber == player.ActorNumber))
+            {
+                var steamId = GetPlayerSteamID(player);
+                Logger.LogInfo($"[Identity Log] Joined: PhotonName={player.NickName} | ActorNumber={player.ActorNumber} | SteamName={SteamFriends.GetFriendPersonaName(steamId)} | SteamID={steamId}");
+
+                _knownPlayerIdentities.Add(new PlayerIdentity(player.NickName, player.ActorNumber, steamId));
+            }
+
+            // Duplicate Photon Nickname Check (with Steam name validation)
+            List<Photon.Realtime.Player> photonPlayersWithSameName = new List<Photon.Realtime.Player>();
+            foreach (var otherPlayer in PhotonNetwork.PlayerList)
+            {
+                if (otherPlayer.ActorNumber != player.ActorNumber && otherPlayer.NickName == player.NickName)
+                {
+                    photonPlayersWithSameName.Add(otherPlayer);
+                }
+            }
+
+            if (photonPlayersWithSameName.Count > 0)
+            {
+                List<CSteamID> matchingSteamIDs = GetSteamIDsForName(player.NickName);
+
+                // +1 for the current player
+                if (matchingSteamIDs.Count < photonPlayersWithSameName.Count + 1)
+                {
+                    Logger.LogWarning($"{player.NickName} is a duplicate Photon nickname without enough matching Steam names! Possible spoofer.");
+                    LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}duplicate Photon nickname detected!</color>", true, false, true);
+                    SoftLockPlayer(player, "Duplicate Photon nickname - possible spoofer");
+                    return;
+                }
+                else
+                {
+                    Logger.LogInfo($"Duplicate Photon name '{player.NickName}' found, but enough matching Steam names exist. Allowing.");
+                }
+            }
+
+            // Cheat mod property checks
             if (player.CustomProperties.ContainsKey("CherryUser"))
             {
                 Logger.LogWarning($"{player.NickName} is using the Cherry cheat mod!");
@@ -338,6 +571,7 @@ namespace AntiCheatMod
                 return;
             }
 
+            // Steam name match fallback (if enabled)
             if (CheckSteamNames.Value)
             {
                 CheckSteamNameMatch(player);
@@ -346,10 +580,21 @@ namespace AntiCheatMod
 
         private void CheckSteamNameMatch(Photon.Realtime.Player player)
         {
+            // First, check against the logged Steam ID from known identities
+            var identity = _knownPlayerIdentities.Find(p => p.ActorNumber == player.ActorNumber);
+            if (identity != null)
+            {
+                var steamName = SteamFriends.GetFriendPersonaName(identity.SteamID);
+                if (steamName == player.NickName)
+                    return; // They match, no spoofing.
+            }
+
+            // Get current Steam lobby
             var lobbyHandler = GameHandler.GetService<SteamLobbyHandler>();
             if (lobbyHandler == null || !lobbyHandler.InSteamLobby(out CSteamID currentLobby))
                 return;
 
+            // Check all lobby members
             int numMembers = SteamMatchmaking.GetNumLobbyMembers(currentLobby);
             bool foundMatch = false;
 
@@ -358,6 +603,7 @@ namespace AntiCheatMod
                 CSteamID memberSteamId = SteamMatchmaking.GetLobbyMemberByIndex(currentLobby, i);
                 string steamName = SteamFriends.GetFriendPersonaName(memberSteamId);
 
+                // Check if this Steam name matches the Photon name
                 if (steamName == player.NickName)
                 {
                     foundMatch = true;
@@ -378,21 +624,38 @@ namespace AntiCheatMod
         {
             Logger.LogInfo($"{newMasterClient.NickName} (#{newMasterClient.ActorNumber}) is the new master client!");
 
-            // Only protect master client if we were previously master client and someone took it
-            if (newMasterClient.ActorNumber != PhotonNetwork.LocalPlayer.ActorNumber && PhotonNetwork.LocalPlayer.IsMasterClient == false)
+            // Only protect master client if someone else took it and we're not master client anymore
+            if (newMasterClient.ActorNumber != PhotonNetwork.LocalPlayer.ActorNumber && !PhotonNetwork.LocalPlayer.IsMasterClient)
             {
                 var lobbyHandler = GameHandler.GetService<SteamLobbyHandler>();
 
                 if (lobbyHandler != null && lobbyHandler.InSteamLobby(out CSteamID currentLobby))
                 {
+                    // Check if we're the Steam lobby owner
                     if (SteamMatchmaking.GetLobbyOwner(currentLobby) == SteamUser.GetSteamID())
                     {
                         Logger.LogWarning($"Master client stolen by: {newMasterClient.NickName}");
                         LogVisually($"{{userColor}}{newMasterClient.NickName}</color> {{leftColor}}tried to take master client</color>", false, false, true);
-                        PhotonNetwork.SetMasterClient(PhotonNetwork.LocalPlayer);
+
+                        // Soft-lock the cheater first
                         SoftLockPlayer(newMasterClient, "Stole master client");
+
+                        // Wait a moment then take master client back
+                        StartCoroutine(Reclaim_MasterClientDelayed());
                     }
                 }
+            }
+        }
+
+        private IEnumerator Reclaim_MasterClientDelayed()
+        {
+            yield return new WaitForSeconds(1f); // Wait 1 second
+
+            // Take master client back
+            if (!PhotonNetwork.LocalPlayer.IsMasterClient)
+            {
+                PhotonNetwork.SetMasterClient(PhotonNetwork.LocalPlayer);
+                Logger.LogInfo("Reclaimed master client after soft-locking cheater");
             }
         }
 
@@ -406,13 +669,14 @@ namespace AntiCheatMod
         public void OnFriendListUpdate(List<FriendInfo> friendList) { }
         public void OnCreatedRoom() { }
         public void OnCreateRoomFailed(short returnCode, string message) { }
-        public void OnJoinedRoom() { }
         public void OnJoinRoomFailed(short returnCode, string message) { }
         public void OnJoinRandomFailed(short returnCode, string message) { }
         public void OnLeftRoom()
         {
             // Clear soft-locked players when leaving room
+            _knownPlayerIdentities.Clear();
             _softLockedPlayers.Clear();
+
         }
 
         // IInRoomCallbacks implementations
@@ -434,7 +698,8 @@ namespace AntiCheatMod
 
         public void OnPlayerLeftRoom(Photon.Realtime.Player otherPlayer)
         {
-            // Remove from soft-locked list when they leave
+            _knownPlayerIdentities.RemoveAll(p => p.ActorNumber == otherPlayer.ActorNumber);
+
             if (_softLockedPlayers.Contains(otherPlayer.ActorNumber))
             {
                 _softLockedPlayers.Remove(otherPlayer.ActorNumber);
@@ -442,96 +707,71 @@ namespace AntiCheatMod
             }
         }
 
-        public void OnPlayerPropertiesUpdate(Photon.Realtime.Player targetPlayer, Hashtable changedProps) { }
+        public void OnPlayerPropertiesUpdate(Photon.Realtime.Player targetPlayer, Hashtable changedProps)
+        {
+            // Check if nickname was changed (potential mid-game name spoofing)
+            if (changedProps.ContainsKey("name") || changedProps.ContainsKey("NickName"))
+            {
+                Logger.LogInfo($"Player {targetPlayer.ActorNumber} changed their name mid-game to {targetPlayer.NickName}");
+
+                if (!PhotonNetwork.IsMasterClient || targetPlayer.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
+                    return;
+
+                // Compare against the originally logged name
+                var identity = _knownPlayerIdentities.Find(p => p.ActorNumber == targetPlayer.ActorNumber);
+                if (identity != null && identity.PhotonName != targetPlayer.NickName)
+                {
+                    Logger.LogWarning($"{targetPlayer.ActorNumber} changed their Photon name from {identity.PhotonName} to {targetPlayer.NickName} - possible spoof attempt");
+                    LogVisually($"{{userColor}}{targetPlayer.NickName}</color> {{leftColor}}name change detected - possible spoofer!</color>", true, false, true);
+                    SoftLockPlayer(targetPlayer, "Mid-game name change - possible spoofer");
+                    return;
+                }
+
+                // Also re-check Steam/Photon match and mod properties in case they're covering their tracks
+                CheckSteamNameMatch(targetPlayer);
+                CheckPlayerForCheatMods(targetPlayer);
+            }
+        }
+
         public void OnRoomPropertiesUpdate(Hashtable propertiesThatChanged) { }
-    }
 
-    // Harmony patches for detecting malicious actions
-    [HarmonyPatch]
-    public static class AntiCheatPatches
+        // Check all players when we join a room
+        public void OnJoinedRoom()
+        {
+            Logger.LogInfo("Joined room - checking all existing players for cheats/spoofing");
+
+            if (PhotonNetwork.IsMasterClient)
+            {
+                StartCoroutine(CheckAllPlayersOnJoin());
+            }
+        }
+
+        private IEnumerator CheckAllPlayersOnJoin()
+        {
+            // Wait for room data to fully sync
+            yield return new WaitForSeconds(3f);
+
+            foreach (var player in PhotonNetwork.PlayerList)
+            {
+                if (player.ActorNumber != PhotonNetwork.LocalPlayer.ActorNumber)
+                {
+                    CheckPlayerForCheatMods(player);
+                }
+            }
+        }
+    }
+    public class PlayerIdentity
     {
-        // Campfire log count manipulation
-        [HarmonyPatch(typeof(Campfire), "SetFireWoodCount")]
-        [HarmonyPrefix]
-        public static bool PreCampfireSetFireWoodCount(Campfire __instance, int count, PhotonMessageInfo info)
+        public string PhotonName;
+        public int ActorNumber;
+        public CSteamID SteamID;
+
+        public PlayerIdentity(string photonName, int actorNumber, CSteamID steamID)
         {
-            if (AntiCheatPlugin.VerboseRPCLogging.Value)
-                AntiCheatPlugin.Logger.LogInfo($"Campfire.SetFireWoodCount called by {info.Sender?.NickName} with count: {count}");
-
-            var photonView = __instance.GetComponent<PhotonView>();
-            bool isValid = __instance.state == Campfire.FireState.Spent || info.Sender == null || (photonView != null && info.Sender.ActorNumber == photonView.Owner.ActorNumber);
-
-            if (!isValid && PhotonNetwork.IsMasterClient)
-            {
-                AntiCheatPlugin.Logger.LogWarning($"{info.Sender.NickName} (#{info.Sender.ActorNumber}) tried to set the log count to {count} for the {__instance.advanceToSegment} campfire!");
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}attempted to modify campfire logs!</color>", false, false, true);
-                AntiCheatPlugin.SoftLockPlayer(info.Sender, "Campfire log manipulation");
-                __instance.FireWoodCount = 3; // Reset to default
-                return false; // Block the RPC
-            }
-
-            return isValid;
-        }
-
-        // Campfire lighting
-        [HarmonyPatch(typeof(Campfire), "Light_Rpc")]
-        [HarmonyPrefix]
-        public static bool PreCampfireLight_Rpc(Campfire __instance, PhotonMessageInfo info)
-        {
-            if (AntiCheatPlugin.VerboseRPCLogging.Value)
-                AntiCheatPlugin.Logger.LogInfo($"Campfire.Light_Rpc called by {info.Sender?.NickName}");
-
-            var photonView = __instance.GetComponent<PhotonView>();
-            bool isValid = info.Sender == null || (photonView != null && info.Sender.ActorNumber == photonView.Owner.ActorNumber);
-
-            if (!isValid)
-            {
-                AntiCheatPlugin.Logger.LogWarning($"{info.Sender.NickName} (#{info.Sender.ActorNumber}) tried to light the {__instance.advanceToSegment} campfire!");
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}attempted to light the {__instance.advanceToSegment} campfire!</color>", false, false, true);
-                AntiCheatPlugin.SoftLockPlayer(info.Sender, "Unauthorized campfire lighting");
-                return false; // Block the RPC
-            }
-
-            return isValid;
-        }
-
-        // Campfire extinguishing
-        [HarmonyPatch(typeof(Campfire), "Extinguish_Rpc")]
-        [HarmonyPrefix]
-        public static bool PreCampfireExtinguish_Rpc(Campfire __instance, PhotonMessageInfo info)
-        {
-            if (AntiCheatPlugin.VerboseRPCLogging.Value)
-                AntiCheatPlugin.Logger.LogInfo($"Campfire.Extinguish_Rpc called by {info.Sender?.NickName}");
-
-            var photonView = __instance.GetComponent<PhotonView>();
-            bool isValid = info.Sender == null || (photonView != null && info.Sender.ActorNumber == photonView.Owner.ActorNumber);
-
-            if (!isValid)
-            {
-                AntiCheatPlugin.Logger.LogWarning($"{info.Sender.NickName} (#{info.Sender.ActorNumber}) tried to extinguish the {__instance.advanceToSegment} campfire!");
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}attempted to extinguish the {__instance.advanceToSegment} campfire!</color>", false, false, true);
-                AntiCheatPlugin.SoftLockPlayer(info.Sender, "Unauthorized campfire extinguish");
-                return false; // Block the RPC
-            }
-
-            return isValid;
-        }
-
-        // Player killing
-        [HarmonyPatch(typeof(Character), "RPCA_Die")]
-        [HarmonyPrefix]
-        public static void PreCharacterRPCA_Die(Character __instance, PhotonMessageInfo info)
-        {
-            if (AntiCheatPlugin.VerboseRPCLogging.Value)
-                AntiCheatPlugin.Logger.LogInfo($"Character.RPCA_Die called by {info.Sender?.NickName} on {__instance.GetComponent<PhotonView>()?.Owner?.NickName}");
-
-            var photonView = __instance.GetComponent<PhotonView>();
-            if (info.Sender == null || info.Sender.IsMasterClient || (photonView != null && info.Sender.ActorNumber == photonView.Owner.ActorNumber))
-                return;
-
-            AntiCheatPlugin.Logger.LogWarning($"{info.Sender.NickName} (#{info.Sender.ActorNumber}) killed {photonView?.Owner?.NickName} (#{photonView?.Owner?.ActorNumber})!");
-            AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}killed</color> {{userColor}}{photonView?.Owner?.NickName}</color>{{leftColor}}!</color>", false, false, true);
-            AntiCheatPlugin.SoftLockPlayer(info.Sender, "Unauthorized kill");
+            PhotonName = photonName;
+            ActorNumber = actorNumber;
+            SteamID = steamID;
         }
     }
+
 }
