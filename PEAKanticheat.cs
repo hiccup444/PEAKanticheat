@@ -16,7 +16,7 @@ using Hashtable = ExitGames.Client.Photon.Hashtable;
 
 namespace AntiCheatMod
 {
-    [BepInPlugin("com.yourname.anticheat", "Anti-Cheat Protection", "2.1.0")]
+    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anti-Cheat", "1.0.0")]
     public class AntiCheatPlugin : BaseUnityPlugin, IConnectionCallbacks, IMatchmakingCallbacks, IInRoomCallbacks
     {
         public static new ManualLogSource Logger;
@@ -45,7 +45,6 @@ namespace AntiCheatMod
             Instance = this;
             Logger = base.Logger;
 
-            // Initialize config
             Config = new ConfigFile(Path.Combine(Paths.ConfigPath, "com.yourname.anticheat.cfg"), true);
             ShowVisualLogs = Config.Bind("General", "ShowVisualLogs", true, "Show anti-cheat messages in the connection log");
             CheckSteamNames = Config.Bind("General", "CheckSteamNames", true, "Check if Photon names match Steam names");
@@ -53,20 +52,16 @@ namespace AntiCheatMod
 
             Logger.LogInfo("Anti-cheat protection active!");
 
-            // Apply Harmony patches
             var harmony = new Harmony("com.yourname.anticheat");
             harmony.PatchAll();
 
-            // Subscribe to Photon callbacks
             PhotonNetwork.AddCallbackTarget(this);
 
-            // Start checking for cheat mods
             StartCoroutine(CheckPlayersForCheats());
         }
 
         private void Update()
         {
-            // Process queued visual logs
             while (_queuedLogs.Count != 0)
             {
                 var log = _queuedLogs.Peek();
@@ -93,7 +88,6 @@ namespace AntiCheatMod
                 _connectionLog = FindObjectOfType<PlayerConnectionLog>();
                 if (_connectionLog)
                 {
-                    // Cache reflection methods and fields
                     var logType = _connectionLog.GetType();
                     _getColorTagMethod = logType.GetMethod("GetColorTag", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                     _addMessageMethod = logType.GetMethod("AddMessage", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
@@ -118,7 +112,6 @@ namespace AntiCheatMod
             {
                 StringBuilder sb = new StringBuilder(message);
 
-                // Get color fields
                 var joinedColorField = _connectionLog.GetType().GetField("joinedColor", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                 var leftColorField = _connectionLog.GetType().GetField("leftColor", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                 var userColorField = _connectionLog.GetType().GetField("userColor", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
@@ -129,7 +122,6 @@ namespace AntiCheatMod
                     var leftColor = leftColorField.GetValue(_connectionLog);
                     var userColor = userColorField.GetValue(_connectionLog);
 
-                    // Use reflection to call GetColorTag
                     string joinedColorTag = (string)_getColorTagMethod.Invoke(_connectionLog, new object[] { joinedColor });
                     string leftColorTag = (string)_getColorTagMethod.Invoke(_connectionLog, new object[] { leftColor });
                     string userColorTag = (string)_getColorTagMethod.Invoke(_connectionLog, new object[] { userColor });
@@ -150,10 +142,8 @@ namespace AntiCheatMod
                     }
                 }
 
-                // Use reflection to call AddMessage
                 _addMessageMethod.Invoke(_connectionLog, new object[] { message });
 
-                // Handle sound effects
                 var sfxJoinField = _connectionLog.GetType().GetField("sfxJoin", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                 var sfxLeaveField = _connectionLog.GetType().GetField("sfxLeave", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
 
@@ -188,18 +178,15 @@ namespace AntiCheatMod
 
         public static void SoftLockPlayer(Photon.Realtime.Player cheater, string reason)
         {
-            // Only work if we're master client
             if (!PhotonNetwork.IsMasterClient)
                 return;
 
-            // Never soft-lock ourselves
             if (cheater.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
             {
                 Logger.LogInfo($"Not soft-locking local player");
                 return;
             }
 
-            // Check if already soft-locked
             if (_softLockedPlayers.Contains(cheater.ActorNumber))
             {
                 return;
@@ -208,7 +195,6 @@ namespace AntiCheatMod
             Logger.LogWarning($"CHEATER DETECTED: {cheater.NickName} - Reason: {reason}");
             LogVisually($"{{userColor}}{cheater.NickName}</color> {{leftColor}}softlocked - {reason}</color>", false, false, true);
 
-            // Try to find AirportCheckInKiosk (only exists in airport scene)
             var kiosk = FindObjectOfType<AirportCheckInKiosk>();
             if (kiosk != null)
             {
@@ -226,10 +212,8 @@ namespace AntiCheatMod
                 }
             }
 
-            // If not in airport scene, use alternative methods
             Logger.LogInfo($"Not in airport scene, using alternative soft-lock for: {cheater.NickName}");
 
-            // Find the cheater's character
             var allCharacters = FindObjectsOfType<Character>();
             Character cheaterCharacter = null;
 
@@ -250,7 +234,6 @@ namespace AntiCheatMod
                 {
                     try
                     {
-                        // Black screen the cheater
                         cheaterPhotonView.RPC("WarpPlayerRPC", RpcTarget.All, new object[]
                         {
                             new Vector3(float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity),
@@ -258,14 +241,12 @@ namespace AntiCheatMod
                         });
                         Logger.LogInfo($"Black screened cheater: {cheater.NickName}");
 
-                        // Try to destroy the cheater's character
                         cheaterPhotonView.OwnershipTransfer = OwnershipOption.Request;
                         cheaterPhotonView.OwnerActorNr = PhotonNetwork.LocalPlayer.ActorNumber;
                         cheaterPhotonView.ControllerActorNr = PhotonNetwork.LocalPlayer.ActorNumber;
                         cheaterPhotonView.RequestOwnership();
                         cheaterPhotonView.TransferOwnership(PhotonNetwork.LocalPlayer);
 
-                        // Wait a frame then destroy
                         Instance.StartCoroutine(DestroyPlayerDelayed(cheaterPhotonView));
 
                         Logger.LogInfo($"Initiated destruction of cheater: {cheater.NickName}");
@@ -286,7 +267,7 @@ namespace AntiCheatMod
 
         private static IEnumerator DestroyPlayerDelayed(PhotonView cheaterPhotonView)
         {
-            yield return new WaitForSeconds(0.1f); // Wait a frame for ownership transfer
+            yield return new WaitForSeconds(0.1f);
             try
             {
                 if (cheaterPhotonView != null && cheaterPhotonView.IsMine)
@@ -307,7 +288,6 @@ namespace AntiCheatMod
             {
                 yield return new WaitForSeconds(5f);
 
-                // Only check if we're master client
                 if (PhotonNetwork.InRoom && PhotonNetwork.IsMasterClient)
                 {
                     foreach (var player in PhotonNetwork.PlayerList)
@@ -323,11 +303,9 @@ namespace AntiCheatMod
             if (player.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
                 return;
 
-            // Skip if already soft-locked
             if (_softLockedPlayers.Contains(player.ActorNumber))
                 return;
 
-            // Check for Cherry cheat mod
             if (player.CustomProperties.ContainsKey("CherryUser"))
             {
                 Logger.LogWarning($"{player.NickName} is using the Cherry cheat mod!");
@@ -344,7 +322,6 @@ namespace AntiCheatMod
                 return;
             }
 
-            // Check for Atlas cheat mod
             if (player.CustomProperties.ContainsKey("AtlUser"))
             {
                 Logger.LogWarning($"{player.NickName} is using the Atlas cheat mod!");
@@ -361,7 +338,6 @@ namespace AntiCheatMod
                 return;
             }
 
-            // Check if Steam name matches Photon name
             if (CheckSteamNames.Value)
             {
                 CheckSteamNameMatch(player);
@@ -370,12 +346,10 @@ namespace AntiCheatMod
 
         private void CheckSteamNameMatch(Photon.Realtime.Player player)
         {
-            // Get current Steam lobby
             var lobbyHandler = GameHandler.GetService<SteamLobbyHandler>();
             if (lobbyHandler == null || !lobbyHandler.InSteamLobby(out CSteamID currentLobby))
                 return;
 
-            // Check all lobby members
             int numMembers = SteamMatchmaking.GetNumLobbyMembers(currentLobby);
             bool foundMatch = false;
 
@@ -384,7 +358,6 @@ namespace AntiCheatMod
                 CSteamID memberSteamId = SteamMatchmaking.GetLobbyMemberByIndex(currentLobby, i);
                 string steamName = SteamFriends.GetFriendPersonaName(memberSteamId);
 
-                // Check if this Steam name matches the Photon name
                 if (steamName == player.NickName)
                 {
                     foundMatch = true;
@@ -559,47 +532,6 @@ namespace AntiCheatMod
             AntiCheatPlugin.Logger.LogWarning($"{info.Sender.NickName} (#{info.Sender.ActorNumber}) killed {photonView?.Owner?.NickName} (#{photonView?.Owner?.ActorNumber})!");
             AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}killed</color> {{userColor}}{photonView?.Owner?.NickName}</color>{{leftColor}}!</color>", false, false, true);
             AntiCheatPlugin.SoftLockPlayer(info.Sender, "Unauthorized kill");
-        }
-
-        // Suspicious prefab spawning (exact names from the other mod)
-        [HarmonyPatch(typeof(PhotonNetwork), "NetworkInstantiate", new Type[]
-        {
-            typeof(Photon.Pun.InstantiateParameters),
-            typeof(bool),
-            typeof(bool)
-        })]
-        [HarmonyPostfix]
-        public static void DetectSuspiciousPrefabSpawn(ref Photon.Pun.InstantiateParameters parameters, ref GameObject __result, bool instantiateEvent)
-        {
-            // Only check if we're master client
-            if (!PhotonNetwork.IsMasterClient || !instantiateEvent || __result == null)
-                return;
-
-            if (AntiCheatPlugin.VerboseRPCLogging.Value)
-                AntiCheatPlugin.Logger.LogInfo($"{parameters.creator.NickName} (#{parameters.creator.ActorNumber}) instantiated the '{parameters.prefabName}' prefab.");
-
-            string prefabName = __result.name;
-
-            // Only check for BingBong prefabs since BeeSwarm doesn't work
-            string[] suspiciousPrefabs = {
-                "Bingbong_Grab",
-                "Bingbong_Blow",
-                "Bingbong_Suck",
-                "Bingbong_Push",
-                "Bingbong_Push_Gentle",
-                "BingBongVoiceRelay"
-            };
-
-            foreach (string suspiciousPrefab in suspiciousPrefabs)
-            {
-                if (prefabName == suspiciousPrefab)
-                {
-                    AntiCheatPlugin.Logger.LogWarning($"{parameters.creator.NickName} spawned suspicious prefab: {prefabName}");
-                    AntiCheatPlugin.LogVisually($"{{userColor}}{parameters.creator.NickName}</color> {{leftColor}}spawned suspicious prefab: {prefabName}!</color>", false, false, true);
-                    AntiCheatPlugin.SoftLockPlayer(parameters.creator, $"Spawned suspicious prefab: {prefabName}");
-                    break;
-                }
-            }
         }
     }
 }
