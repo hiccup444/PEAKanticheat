@@ -16,6 +16,7 @@ namespace AntiCheatPreloader
         {
             "System.Void Campfire::SetFireWoodCount(System.Int32)",
             "System.Void Campfire::Extinguish_Rpc()",
+            "System.Void Campfire::Light_Rpc()",  // Added this line
             "System.Void Character::RPCA_Die(UnityEngine.Vector3)",
             "System.Void Character::RPCA_ReviveAtPosition(UnityEngine.Vector3,System.Boolean)",
             "System.Void Bugfix::AttachBug(System.Int32)"
