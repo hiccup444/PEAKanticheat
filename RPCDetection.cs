@@ -190,65 +190,67 @@ namespace AntiCheatMod
                     }
                 }
 
-                // Special handling for revive (Method 64) - check if they have/had Scout Effigy
+
                 if (methodName == "64" && parameters != null && parameters.Length == 1 && parameters[0] is bool)
                 {
-                    if (!sender.IsMasterClient)
+                    AntiCheatPlugin.Logger.LogInfo($"[DEBUG] Method 64 detected from {sender.NickName}");
+
+                    // Check if they currently have OR recently had a Scout Effigy
+                    bool hasOrHadScoutEffigy = false;
+
+                    // First check current item
+                    Character senderCharacter = null;
+                    var allCharacters = UnityEngine.Object.FindObjectsOfType<Character>();
+                    foreach (var character in allCharacters)
                     {
-                        // Check if they currently have OR recently had a Scout Effigy
-                        bool hasOrHadScoutEffigy = false;
-
-                        // First check current item
-                        Character senderCharacter = null;
-                        var allCharacters = UnityEngine.Object.FindObjectsOfType<Character>();
-                        foreach (var character in allCharacters)
+                        var charPhotonView = character.GetComponent<PhotonView>();
+                        if (charPhotonView != null && charPhotonView.Owner != null && charPhotonView.Owner.ActorNumber == sender.ActorNumber)
                         {
-                            var charPhotonView = character.GetComponent<PhotonView>();
-                            if (charPhotonView != null && charPhotonView.Owner != null && charPhotonView.Owner.ActorNumber == sender.ActorNumber)
-                            {
-                                senderCharacter = character;
-                                break;
-                            }
+                            senderCharacter = character;
+                            break;
                         }
+                    }
 
-                        if (senderCharacter != null)
+                    if (senderCharacter != null)
+                    {
+                        var characterData = senderCharacter.GetComponent<CharacterData>();
+                        if (characterData != null && characterData.currentItem != null)
                         {
-                            var characterData = senderCharacter.GetComponent<CharacterData>();
-                            if (characterData != null && characterData.currentItem != null)
-                            {
-                                string itemName = characterData.currentItem.name.ToLower();
-                                if (itemName.Contains("scout") && itemName.Contains("effigy"))
-                                {
-                                    hasOrHadScoutEffigy = true;
-                                }
-                            }
-                        }
-
-                        // If not currently holding, check last held item
-                        if (!hasOrHadScoutEffigy)
-                        {
-                            if (AntiCheatPlugin.PlayerHadItem(sender.ActorNumber, "scout") &&
-                                AntiCheatPlugin.PlayerHadItem(sender.ActorNumber, "effigy"))
+                            string itemName = characterData.currentItem.name.ToLower();
+                            AntiCheatPlugin.Logger.LogInfo($"[DEBUG] Current item: {itemName}");
+                            if (itemName.Contains("scout") && itemName.Contains("effigy"))
                             {
                                 hasOrHadScoutEffigy = true;
-                                if (AntiCheatPlugin.VerboseRPCLogging.Value)
-                                {
-                                    AntiCheatPlugin.Logger.LogInfo($"{sender.NickName} had Scout Effigy recently - legitimate revive");
-                                }
                             }
                         }
+                    }
 
-                        // If they don't have and didn't recently have a Scout Effigy, it's a cheat
-                        if (!hasOrHadScoutEffigy)
+                    // If not currently holding, check last held item
+                    if (!hasOrHadScoutEffigy)
+                    {
+                        // Check with 2-second window
+                        if (AntiCheatPlugin.PlayerHadItem(sender.ActorNumber, "scout", 2f) &&
+                            AntiCheatPlugin.PlayerHadItem(sender.ActorNumber, "effigy", 2f))
                         {
-                            AntiCheatPlugin.Logger.LogWarning($"[UNAUTHORIZED RPC] {sender.NickName} (#{sender.ActorNumber}) attempted to revive someone!");
-                            AntiCheatPlugin.LogVisually($"{{userColor}}{sender.NickName}</color> {{leftColor}}attempted to revive someone!</color>", false, false, true);
-                            AntiCheatPlugin.SoftLockPlayer(sender, "Unauthorized revive");
-                            return false; // Block the RPC
+                            hasOrHadScoutEffigy = true;
+                            AntiCheatPlugin.Logger.LogInfo($"[DEBUG] Player had Scout Effigy within 2 seconds");
                         }
-                        // If they have/had Scout Effigy, allow the revive to proceed
+                    }
+
+                    AntiCheatPlugin.Logger.LogInfo($"[DEBUG] hasOrHadScoutEffigy: {hasOrHadScoutEffigy}");
+
+                    // Allow if master client OR has Scout Effigy
+                    if (sender.IsMasterClient || hasOrHadScoutEffigy)
+                    {
+                        AntiCheatPlugin.Logger.LogInfo($"[DEBUG] Allowing revive - Master: {sender.IsMasterClient}, Scout Effigy: {hasOrHadScoutEffigy}");
                         return true;
                     }
+
+                    // Block if not master client AND no Scout Effigy
+                    AntiCheatPlugin.Logger.LogWarning($"[UNAUTHORIZED RPC] {sender.NickName} (#{sender.ActorNumber}) attempted to revive someone without Scout Effigy!");
+                    AntiCheatPlugin.LogVisually($"{{userColor}}{sender.NickName}</color> {{leftColor}}attempted to revive someone!</color>", false, false, true);
+                    AntiCheatPlugin.SoftLockPlayer(sender, "Unauthorized revive - no Scout Effigy");
+                    return false;
                 }
 
                 // Check for other numeric RPC patterns (excluding revive which we handle specially above)
@@ -365,38 +367,53 @@ namespace AntiCheatMod
         // Player killing
         [HarmonyPatch(typeof(Character), "RPCA_Die")]
         [HarmonyPrefix]
-        public static void PreCharacterRPCA_Die(Character __instance, PhotonMessageInfo info)
+        public static bool PreCharacterRPCA_Die(Character __instance, PhotonMessageInfo info)
         {
             if (AntiCheatPlugin.VerboseRPCLogging.Value)
                 AntiCheatPlugin.Logger.LogInfo($"Character.RPCA_Die called by {info.Sender?.NickName} on {__instance.GetComponent<PhotonView>()?.Owner?.NickName}");
 
             var photonView = __instance.GetComponent<PhotonView>();
             if (info.Sender == null || info.Sender.IsMasterClient || (photonView != null && info.Sender.ActorNumber == photonView.Owner.ActorNumber))
-                return;
+                return true; // Allow legitimate kills
 
-            AntiCheatPlugin.Logger.LogWarning($"{info.Sender.NickName} (#{info.Sender.ActorNumber}) killed {photonView?.Owner?.NickName} (#{photonView?.Owner?.ActorNumber})!");
-            AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}killed</color> {{userColor}}{photonView?.Owner?.NickName}</color>{{leftColor}}!</color>", false, false, true);
-            AntiCheatPlugin.SoftLockPlayer(info.Sender, "Unauthorized kill");
+            AntiCheatPlugin.Logger.LogWarning($"{info.Sender.NickName} (#{info.Sender.ActorNumber}) attempted to kill {photonView?.Owner?.NickName} (#{photonView?.Owner?.ActorNumber})!");
+            AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}attempted to kill</color> {{userColor}}{photonView?.Owner?.NickName}</color>{{leftColor}}!</color>", false, false, true);
+            AntiCheatPlugin.SoftLockPlayer(info.Sender, "Unauthorized kill attempt");
+            return false; // Block the kill
         }
 
         // Player reviving
         [HarmonyPatch(typeof(Character), "RPCA_ReviveAtPosition")]
         [HarmonyPrefix]
-        public static void PreCharacterRPCA_ReviveAtPosition(Character __instance, PhotonMessageInfo info)
+        public static bool PreCharacterRPCA_ReviveAtPosition(Character __instance, PhotonMessageInfo info)
         {
             if (AntiCheatPlugin.VerboseRPCLogging.Value)
                 AntiCheatPlugin.Logger.LogInfo($"Character.RPCA_ReviveAtPosition called by {info.Sender?.NickName} on {__instance.GetComponent<PhotonView>()?.Owner?.NickName}");
 
             var photonView = __instance.GetComponent<PhotonView>();
-            bool isValid = info.Sender == null || info.Sender.IsMasterClient || (photonView != null && info.Sender.ActorNumber == photonView.Owner.ActorNumber);
 
-            if (isValid)
-                return;
+            // Always allow if sender is null or master client
+            if (info.Sender == null || info.Sender.IsMasterClient)
+                return true;
+
+            // Allow if they're reviving themselves
+            if (photonView != null && info.Sender.ActorNumber == photonView.Owner.ActorNumber)
+                return true;
+
+            // Check if they have/had Scout Effigy before flagging as unauthorized (with 2-second window)
+            if (AntiCheatPlugin.PlayerHadItem(info.Sender.ActorNumber, "scout", 2f) &&
+                AntiCheatPlugin.PlayerHadItem(info.Sender.ActorNumber, "effigy", 2f))
+            {
+                if (AntiCheatPlugin.VerboseRPCLogging.Value)
+                    AntiCheatPlugin.Logger.LogInfo($"{info.Sender.NickName} used Scout Effigy to revive - legitimate");
+                return true; // Allow the revive
+            }
 
             // Unauthorized revive attempt
-            AntiCheatPlugin.Logger.LogWarning($"{info.Sender.NickName} (#{info.Sender.ActorNumber}) revived {photonView?.Owner?.NickName} (#{photonView?.Owner?.ActorNumber}) without permission!");
-            AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}revived</color> {{userColor}}{photonView?.Owner?.NickName}</color>{{leftColor}} without permission!</color>", false, false, true);
+            AntiCheatPlugin.Logger.LogWarning($"{info.Sender.NickName} (#{info.Sender.ActorNumber}) attempted to revive {photonView?.Owner?.NickName} (#{photonView?.Owner?.ActorNumber}) without permission!");
+            AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}attempted to revive</color> {{userColor}}{photonView?.Owner?.NickName}</color>{{leftColor}} without permission!</color>", false, false, true);
             AntiCheatPlugin.SoftLockPlayer(info.Sender, "Unauthorized revive");
+            return false; // Block the revive
         }
     }
 }
