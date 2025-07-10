@@ -24,7 +24,7 @@ namespace AntiCheatMod
         public static new ManualLogSource Logger;
         private static AntiCheatPlugin Instance;
         private static new ConfigFile Config;
-        private static readonly Dictionary<int, string> _playerLastHeldItems = new Dictionary<int, string>();
+        private static readonly Dictionary<int, (string itemName, DateTime timestamp)> _playerLastHeldItems = new Dictionary<int, (string, DateTime)>();
 
         // Config entries
         private static ConfigEntry<bool> ShowVisualLogs;
@@ -98,7 +98,7 @@ namespace AntiCheatMod
         {
             if (!string.IsNullOrEmpty(itemName))
             {
-                _playerLastHeldItems[actorNumber] = itemName.ToLower();
+                _playerLastHeldItems[actorNumber] = (itemName.ToLower(), DateTime.Now);
                 if (VerboseRPCLogging.Value)
                 {
                     Logger.LogInfo($"Updated held item for Actor #{actorNumber}: {itemName}");
@@ -106,11 +106,30 @@ namespace AntiCheatMod
             }
         }
 
-        public static bool PlayerHadItem(int actorNumber, string itemNamePart)
+        public static bool PlayerHadItem(int actorNumber, string itemNamePart, float withinSeconds = 2f)
         {
-            if (_playerLastHeldItems.TryGetValue(actorNumber, out string lastItem))
+            Logger.LogInfo($"[PlayerHadItem] Checking actor {actorNumber} for item containing '{itemNamePart}' within {withinSeconds} seconds");
+
+            if (_playerLastHeldItems.TryGetValue(actorNumber, out var itemData))
             {
-                return lastItem.Contains(itemNamePart.ToLower());
+                var timeSince = (DateTime.Now - itemData.timestamp).TotalSeconds;
+                Logger.LogInfo($"[PlayerHadItem] Found item: {itemData.itemName}, held {timeSince:F2} seconds ago");
+
+                // Check if it was held within the time window
+                if (timeSince <= withinSeconds)
+                {
+                    bool contains = itemData.itemName.Contains(itemNamePart.ToLower());
+                    Logger.LogInfo($"[PlayerHadItem] Within time window. Contains '{itemNamePart}'? {contains}");
+                    return contains;
+                }
+                else
+                {
+                    Logger.LogInfo($"[PlayerHadItem] Outside time window ({timeSince:F2} > {withinSeconds})");
+                }
+            }
+            else
+            {
+                Logger.LogInfo($"[PlayerHadItem] No item history found for actor {actorNumber}");
             }
             return false;
         }
