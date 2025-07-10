@@ -24,6 +24,7 @@ namespace AntiCheatMod
         public static new ManualLogSource Logger;
         private static AntiCheatPlugin Instance;
         private static new ConfigFile Config;
+        private static readonly Dictionary<int, string> _playerLastHeldItems = new Dictionary<int, string>();
 
         // Config entries
         private static ConfigEntry<bool> ShowVisualLogs;
@@ -69,6 +70,9 @@ namespace AntiCheatMod
 
             // Start checking for cheat mods
             StartCoroutine(CheckPlayersForCheats());
+
+            // Start tracking player items
+            StartCoroutine(TrackPlayerItems());
         }
 
         private void Update()
@@ -88,6 +92,27 @@ namespace AntiCheatMod
         private void OnDestroy()
         {
             PhotonNetwork.RemoveCallbackTarget(this);
+        }
+
+        public static void UpdatePlayerHeldItem(int actorNumber, string itemName)
+        {
+            if (!string.IsNullOrEmpty(itemName))
+            {
+                _playerLastHeldItems[actorNumber] = itemName.ToLower();
+                if (VerboseRPCLogging.Value)
+                {
+                    Logger.LogInfo($"Updated held item for Actor #{actorNumber}: {itemName}");
+                }
+            }
+        }
+
+        public static bool PlayerHadItem(int actorNumber, string itemNamePart)
+        {
+            if (_playerLastHeldItems.TryGetValue(actorNumber, out string lastItem))
+            {
+                return lastItem.Contains(itemNamePart.ToLower());
+            }
+            return false;
         }
 
         public static bool LogVisually(string message, bool onlySendOnce = false, bool sfxJoin = false, bool sfxLeave = false)
@@ -673,10 +698,10 @@ namespace AntiCheatMod
         public void OnJoinRandomFailed(short returnCode, string message) { }
         public void OnLeftRoom()
         {
-            // Clear soft-locked players when leaving room
+            // Clear all tracking when leaving room
             _knownPlayerIdentities.Clear();
             _softLockedPlayers.Clear();
-
+            _playerLastHeldItems.Clear();
         }
 
         // IInRoomCallbacks implementations
@@ -696,9 +721,38 @@ namespace AntiCheatMod
             CheckPlayerForCheatMods(player);
         }
 
+        private IEnumerator TrackPlayerItems()
+        {
+            while (true)
+            {
+                yield return new WaitForSeconds(2f);
+
+                if (!PhotonNetwork.InRoom)
+                    continue;
+
+                // Track all players' current items
+                var allCharacters = FindObjectsOfType<Character>();
+                foreach (var character in allCharacters)
+                {
+                    var photonView = character.GetComponent<PhotonView>();
+                    if (photonView == null || photonView.Owner == null)
+                        continue;
+
+                    var characterData = character.GetComponent<CharacterData>();
+                    if (characterData != null && characterData.currentItem != null)
+                    {
+                        UpdatePlayerHeldItem(photonView.Owner.ActorNumber, characterData.currentItem.name);
+                    }
+                }
+            }
+        }
+
         public void OnPlayerLeftRoom(Photon.Realtime.Player otherPlayer)
         {
             _knownPlayerIdentities.RemoveAll(p => p.ActorNumber == otherPlayer.ActorNumber);
+
+            // Remove from held items tracking
+            _playerLastHeldItems.Remove(otherPlayer.ActorNumber);
 
             if (_softLockedPlayers.Contains(otherPlayer.ActorNumber))
             {
