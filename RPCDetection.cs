@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using ExitGames.Client.Photon;
 using Hashtable = ExitGames.Client.Photon.Hashtable;
+using Photon.Realtime;
 
 namespace AntiCheatMod
 {
@@ -133,7 +134,17 @@ namespace AntiCheatMod
         {
             try
             {
-                // Only process if we're the master client and sender is another player
+                // Block ALL RPCs from soft-locked players for EVERYONE with the mod
+                if (sender != null && AntiCheatPlugin.IsSoftLocked(sender.ActorNumber))
+                {
+                    if (AntiCheatPlugin.VerboseRPCLogging.Value)
+                    {
+                        AntiCheatPlugin.Logger.LogInfo($"[BLOCKED ALL] Blocked RPC from soft-locked player {sender.NickName} (#{sender.ActorNumber})");
+                    }
+                    return false; // Block for everyone with the mod
+                }
+
+                // Only do additional detection if we're the master client
                 if (!PhotonNetwork.IsMasterClient || sender == null || sender.IsLocal)
                     return true;
 
@@ -152,6 +163,45 @@ namespace AntiCheatMod
 
                 // Get parameters
                 if (rpcData.ContainsKey((byte)4)) parameters = rpcData[(byte)4] as object[];
+
+                // Check for kill attempt (Method 108)
+                if (methodName == "108" && parameters != null && parameters.Length == 1 && parameters[0] is Vector3)
+                {
+                    // Allow if sender is master client
+                    if (sender.IsMasterClient)
+                        return true;
+
+                    AntiCheatPlugin.Logger.LogWarning($"[KILL BLOCKED] {sender.NickName} (#{sender.ActorNumber}) attempted to kill someone!");
+                    AntiCheatPlugin.LogVisually($"{{userColor}}{sender.NickName}</color> {{leftColor}}attempted to illegally kill someone!</color>", false, false, true);
+                    AntiCheatPlugin.SoftLockPlayer(sender, "Unauthorized kill attempt");
+                    return false; // Block the RPC at network level
+                }
+
+                // Check for grow vine exploit (Method 107)
+                if (methodName == "107" && parameters != null && parameters.Length == 3)
+                {
+                    // Vines should only be grown by master client or with magic beans
+                    if (!sender.IsMasterClient)
+                    {
+                        AntiCheatPlugin.Logger.LogWarning($"[VINE GROW BLOCKED] {sender.NickName} (#{sender.ActorNumber}) attempted to grow vines!");
+                        AntiCheatPlugin.LogVisually($"{{userColor}}{sender.NickName}</color> {{leftColor}}attempted to illegally grow vines!</color>", false, false, true);
+                        AntiCheatPlugin.SoftLockPlayer(sender, "Unauthorized vine growth");
+                        return false;
+                    }
+                }
+
+                // Check for assign status exploit (Method 154)
+                if (methodName == "154" && parameters != null && parameters.Length == 1 && parameters[0] is float[])
+                {
+                    // Status effects should only be assigned by master client
+                    if (!sender.IsMasterClient)
+                    {
+                        AntiCheatPlugin.Logger.LogWarning($"[STATUS ASSIGN BLOCKED] {sender.NickName} (#{sender.ActorNumber}) attempted to assign status effects!");
+                        AntiCheatPlugin.LogVisually($"{{userColor}}{sender.NickName}</color> {{leftColor}}attempted to illegally assign status effects!</color>", false, false, true);
+                        AntiCheatPlugin.SoftLockPlayer(sender, "Unauthorized status assignment");
+                        return false;
+                    }
+                }
 
                 // Check for banana slip pattern (Method 164)
                 if (methodName == "164" && parameters != null && parameters.Length == 1)
@@ -181,7 +231,7 @@ namespace AntiCheatMod
                                 string targetName = targetView?.Owner?.NickName ?? "Unknown";
 
                                 AntiCheatPlugin.Logger.LogWarning($"[BANANA SLIP CHEAT] {sender.NickName} (#{sender.ActorNumber}) illegally slipped {targetName} (ViewID: {targetViewId})!");
-                                AntiCheatPlugin.LogVisually($"{{userColor}}{sender.NickName}</color> {{leftColor}}illegally slipped</color> {{userColor}}{targetName}!</color>", false, false, true);
+                                AntiCheatPlugin.LogVisually($"{{userColor}}{sender.NickName}</color> {{leftColor}}attempted to illegally slip</color> {{userColor}}{targetName}!</color>", false, false, true);
                                 AntiCheatPlugin.SoftLockPlayer(sender, "Unauthorized banana slip - targeting other player");
                                 return false; // Block the RPC
                             }
@@ -190,7 +240,7 @@ namespace AntiCheatMod
                     }
                 }
 
-
+                // Special handling for revive (Method 64) - check if they have/had Scout Effigy
                 if (methodName == "64" && parameters != null && parameters.Length == 1 && parameters[0] is bool)
                 {
                     AntiCheatPlugin.Logger.LogInfo($"[DEBUG] Method 64 detected from {sender.NickName}");
@@ -248,7 +298,7 @@ namespace AntiCheatMod
 
                     // Block if not master client AND no Scout Effigy
                     AntiCheatPlugin.Logger.LogWarning($"[UNAUTHORIZED RPC] {sender.NickName} (#{sender.ActorNumber}) attempted to revive someone without Scout Effigy!");
-                    AntiCheatPlugin.LogVisually($"{{userColor}}{sender.NickName}</color> {{leftColor}}attempted to revive someone!</color>", false, false, true);
+                    AntiCheatPlugin.LogVisually($"{{userColor}}{sender.NickName}</color> {{leftColor}}attempted to illegally revive someone!</color>", false, false, true);
                     AntiCheatPlugin.SoftLockPlayer(sender, "Unauthorized revive - no Scout Effigy");
                     return false;
                 }
@@ -257,11 +307,9 @@ namespace AntiCheatMod
                 if (!string.IsNullOrEmpty(methodName) && KnownRPCPatterns.ContainsKey(methodName) && methodName != "64")
                 {
                     var pattern = KnownRPCPatterns[methodName];
-
                     // Skip legitimate revive (method 17)
                     if (methodName == "17")
                         return true;
-
                     // Check if this RPC requires master client
                     if (pattern.RequiresMasterClient && !sender.IsMasterClient)
                     {
@@ -269,9 +317,23 @@ namespace AntiCheatMod
                         if (parameters != null && pattern.ParameterCheck(parameters))
                         {
                             string paramStr = FormatParameters(parameters);
-
                             AntiCheatPlugin.Logger.LogWarning($"[UNAUTHORIZED RPC] {sender.NickName} (#{sender.ActorNumber}) called {pattern.Description} (Method {methodName}) with params: {paramStr}");
-                            AntiCheatPlugin.LogVisually($"{{userColor}}{sender.NickName}</color> {{leftColor}}illegally used {pattern.Description}!</color>", false, false, true);
+
+                            // Updated visual log message based on pattern type
+                            string visualMessage;
+                            switch (pattern.Description)
+                            {
+                                case "Teleport/Warp":
+                                    visualMessage = $"{{userColor}}{sender.NickName}</color> {{leftColor}}attempted to illegally teleport someone!</color>";
+                                    break;
+                                case "Bee Swarm Control":
+                                    visualMessage = $"{{userColor}}{sender.NickName}</color> {{leftColor}}attempted to illegally control bee swarms!</color>";
+                                    break;
+                                default:
+                                    visualMessage = $"{{userColor}}{sender.NickName}</color> {{leftColor}}illegally used {pattern.Description}!</color>";
+                                    break;
+                            }
+                            AntiCheatPlugin.LogVisually(visualMessage, false, false, true);
 
                             // Determine punishment reason using traditional switch
                             string reason;
@@ -290,7 +352,6 @@ namespace AntiCheatMod
                                     reason = $"Unauthorized {pattern.Description}";
                                     break;
                             }
-
                             AntiCheatPlugin.SoftLockPlayer(sender, reason);
                             return false; // Block the RPC
                         }
@@ -315,6 +376,107 @@ namespace AntiCheatMod
                 AntiCheatPlugin.Logger.LogError($"Error in RPC detection: {ex.Message}");
                 return true;
             }
+        }
+
+        [HarmonyPatch(typeof(PhotonNetwork), "OnEvent")]
+        [HarmonyPrefix]
+        public static bool PreOnEvent(EventData photonEvent)
+        {
+            int sender = photonEvent.Sender;
+
+            // Block events from soft-locked players for EVERYONE with the mod
+            if (sender > 0 && AntiCheatPlugin.IsSoftLocked(sender))
+            {
+                // Don't log event 201 as it spams the console
+                if (photonEvent.Code != 201)
+                {
+                    AntiCheatPlugin.Logger.LogInfo($"[BLOCKED EVENT] Blocked event {photonEvent.Code} from soft-locked player (Actor #{sender})");
+                }
+                return false; // Block for everyone
+            }
+
+            // Log ownership events if we're master client
+            if (PhotonNetwork.IsMasterClient && (photonEvent.Code == 209 || photonEvent.Code == 210 || photonEvent.Code == 212))
+            {
+                AntiCheatPlugin.Logger.LogInfo($"[OWNERSHIP EVENT] Code {photonEvent.Code} from actor #{sender}, soft-locked: {AntiCheatPlugin.IsSoftLocked(sender)}");
+            }
+
+            // Additional protection for ownership theft (works for everyone)
+            if (photonEvent.Code == 210) // OwnershipTransfer
+            {
+                int[] data = (int[])photonEvent.CustomData;
+                if (data != null && data.Length >= 2)
+                {
+                    int viewId = data[0];
+                    int newOwner = data[1];
+
+                    // First check: Is the sender soft-locked? Block ALL their ownership attempts
+                    if (AntiCheatPlugin.IsSoftLocked(sender))
+                    {
+                        AntiCheatPlugin.Logger.LogWarning($"[OWNERSHIP BLOCKED] Soft-locked player (Actor #{sender}) tried to transfer ownership of view {viewId}");
+                        return false; // Block all ownership transfers from soft-locked players
+                    }
+
+                    // Second check: Is someone trying to steal YOUR character?
+                    PhotonView targetView = PhotonView.Find(viewId);
+                    if (targetView != null && targetView.Owner != null)
+                    {
+                        // If someone is trying to steal ownership of our character
+                        if (targetView.Owner.IsLocal && newOwner != PhotonNetwork.LocalPlayer.ActorNumber)
+                        {
+                            Photon.Realtime.Player senderPlayer = PhotonNetwork.CurrentRoom?.GetPlayer(sender);
+                            if (senderPlayer != null && !senderPlayer.IsMasterClient)
+                            {
+                                AntiCheatPlugin.Logger.LogWarning($"[OWNERSHIP THEFT BLOCKED] {senderPlayer.NickName} tried to steal ownership of your view {viewId}!");
+
+                                // Only show visual logs and soft-lock if we're master client
+                                if (PhotonNetwork.IsMasterClient)
+                                {
+                                    AntiCheatPlugin.LogVisually($"{{userColor}}{senderPlayer.NickName}</color> {{leftColor}}tried to steal your character!</color>", false, false, true);
+                                    AntiCheatPlugin.SoftLockPlayer(senderPlayer, "Attempted ownership theft");
+                                }
+
+                                return false; // Block the theft
+                            }
+                        }
+                    }
+                }
+            }
+
+            return true;
+        }
+
+
+        [HarmonyPatch(typeof(PhotonView), "OwnerActorNr", MethodType.Setter)]
+        [HarmonyPrefix]
+        public static bool PreOwnerActorNrSetter(PhotonView __instance, int value)
+        {
+            // Always allow during spawn grace period
+            if (AntiCheatPlugin.IsInSpawnGracePeriod(value))
+            {
+                AntiCheatPlugin.Logger.LogInfo($"[SPAWN GRACE] Allowing ownership change to actor #{value} during spawn period");
+                return true;
+            }
+
+            // If this is our object and someone else is trying to claim it
+            if (__instance.Owner != null && __instance.Owner.IsLocal && value != PhotonNetwork.LocalPlayer.ActorNumber)
+            {
+                // Check if there's a name collision with a recently joined player
+                var newOwnerPlayer = PhotonNetwork.CurrentRoom?.GetPlayer(value);
+                if (newOwnerPlayer != null)
+                {
+                    // For high ViewIDs (character spawns), check name collision
+                    if (__instance.ViewID >= 20000 && newOwnerPlayer.NickName.ToLower() == PhotonNetwork.LocalPlayer.NickName.ToLower())
+                    {
+                        AntiCheatPlugin.Logger.LogWarning($"[NAME COLLISION] Allowing ownership transfer of view {__instance.ViewID} to {newOwnerPlayer.NickName} (#{value}) to prevent character mixup");
+                        return true;
+                    }
+                }
+
+                AntiCheatPlugin.Logger.LogWarning($"[BLOCKED] Attempt to change ownership of your view {__instance.ViewID} to actor #{value}");
+                return false;
+            }
+            return true;
         }
 
         // ===== EXISTING DETECTIONS =====
@@ -380,6 +542,85 @@ namespace AntiCheatMod
             AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}attempted to kill</color> {{userColor}}{photonView?.Owner?.NickName}</color>{{leftColor}}!</color>", false, false, true);
             AntiCheatPlugin.SoftLockPlayer(info.Sender, "Unauthorized kill attempt");
             return false; // Block the kill
+        }
+
+        [HarmonyPatch(typeof(PhotonNetwork), "RaiseEventInternal")]
+        [HarmonyPrefix]
+        internal static bool PreRaiseEventInternal(byte eventCode, object eventContent, RaiseEventOptions raiseEventOptions, SendOptions sendOptions)
+        {
+            var localPlayer = PhotonNetwork.LocalPlayer;
+
+            // If sender is soft-locked, block all critical events
+            if (localPlayer != null && AntiCheatPlugin.IsSoftLocked(localPlayer.ActorNumber))
+            {
+                switch (eventCode)
+                {
+                    case 200: // RPC
+                    case 202: // Instantiate
+                    case 204: // Destroy
+                    case 207: // Destroy player objects
+                    case 209: // Ownership request
+                    case 210: // Ownership transfer  
+                    case 212: // Ownership update
+                        AntiCheatPlugin.Logger.LogWarning($"[EVENT BLOCKED] Blocked event {eventCode} from soft-locked player {localPlayer.NickName}");
+                        return false;
+                }
+            }
+
+            // Special handling for destroy events - check if they're trying to destroy something they don't own
+            if (eventCode == 204 && eventContent is Hashtable destroyData)
+            {
+                if (destroyData.ContainsKey((byte)0)) // PhotonNetwork.keyByteZero contains the view ID
+                {
+                    int viewId = (int)destroyData[(byte)0];
+                    PhotonView targetView = PhotonView.Find(viewId);
+
+                    if (targetView != null && targetView.Owner != null && localPlayer != null)
+                    {
+                        // Block if they're trying to destroy something they don't own
+                        if (targetView.Owner.ActorNumber != localPlayer.ActorNumber && !localPlayer.IsMasterClient)
+                        {
+                            AntiCheatPlugin.Logger.LogWarning($"[DESTROY BLOCKED] {localPlayer.NickName} tried to destroy view {viewId} owned by {targetView.Owner.NickName}");
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        [HarmonyPatch(typeof(PhotonNetwork), "RemoveInstantiatedGO")]
+        [HarmonyPrefix]
+        internal static bool PreRemoveInstantiatedGO(GameObject go, bool localOnly)
+        {
+            if (go == null) return true;
+
+            var photonView = go.GetComponent<PhotonView>();
+            if (photonView != null && photonView.Owner != null)
+            {
+                var localPlayer = PhotonNetwork.LocalPlayer;
+
+                // If a soft-locked player is trying to destroy something
+                if (localPlayer != null && AntiCheatPlugin.IsSoftLocked(localPlayer.ActorNumber))
+                {
+                    // Allow if they own it
+                    if (photonView.Owner.ActorNumber == localPlayer.ActorNumber)
+                    {
+                        AntiCheatPlugin.Logger.LogInfo($"[DESTROY ALLOWED] Soft-locked player destroying their own object {go.name}");
+                        return true;
+                    }
+
+                    // Block if they don't own it
+                    AntiCheatPlugin.Logger.LogWarning($"[DESTROY BLOCKED] Soft-locked player tried to remove {go.name} owned by {photonView.Owner.NickName}");
+                    return false;
+                }
+
+                // Log normal destroys for debugging
+                AntiCheatPlugin.Logger.LogInfo($"[DESTROY] {localPlayer?.NickName ?? "System"} removing {go.name} owned by {photonView.Owner.NickName}");
+            }
+
+            return true;
         }
 
         // Player reviving
