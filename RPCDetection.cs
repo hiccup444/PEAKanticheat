@@ -79,18 +79,13 @@ namespace AntiCheatMod
         {
             int sender = photonEvent.Sender;
 
-            // Block events from soft-locked players ONLY if auto-punishment is enabled
-            if (sender > 0 && AntiCheatPlugin.IsSoftLocked(sender) && AntiCheatPlugin.AutoPunishCheaters.Value)
+            // Block events from soft-locked players silently
+            if (sender > 0 && AntiCheatPlugin.IsSoftLocked(sender))
             {
-                // Don't log event 201 as it spams the console
-                if (photonEvent.Code != 201)
-                {
-                    AntiCheatPlugin.Logger.LogInfo($"[BLOCKED EVENT] Blocked event {photonEvent.Code} from soft-locked player (Actor #{sender})");
-                }
-                return false; // Block for everyone
+                return false; // Block without logging
             }
 
-            // Log ownership events if we're master client (regardless of auto-punishment setting)
+            // Log ownership events if we're master client
             if (PhotonNetwork.IsMasterClient && (photonEvent.Code == 209 || photonEvent.Code == 210 || photonEvent.Code == 212))
             {
                 AntiCheatPlugin.Logger.LogInfo($"[OWNERSHIP EVENT] Code {photonEvent.Code} from actor #{sender}, soft-locked: {AntiCheatPlugin.IsSoftLocked(sender)}");
@@ -175,6 +170,43 @@ namespace AntiCheatMod
                             }
                         }
                     }
+
+                    // Block destroy events targeting local player's objects
+                    if (photonEvent.Code == 204) // Destroy
+                    {
+                        if (photonEvent.CustomData is Hashtable destroyData && destroyData.ContainsKey((byte)0))
+                        {
+                            int destroyViewId = (int)destroyData[(byte)0];
+                            PhotonView destroyTargetView = PhotonView.Find(destroyViewId);
+
+                            // Only protect local player's objects
+                            if (destroyTargetView != null && destroyTargetView.IsMine)
+                            {
+                                // Block if someone else is trying to destroy our object
+                                if (sender != PhotonNetwork.LocalPlayer.ActorNumber)
+                                {
+                                    Photon.Realtime.Player senderPlayer = PhotonNetwork.CurrentRoom?.GetPlayer(sender);
+                                    AntiCheatPlugin.Logger.LogError($"[DESTROY BLOCKED] {senderPlayer?.NickName ?? $"Actor {sender}"} tried to destroy your object (ViewID: {destroyViewId})!");
+
+                                    // Extra logging if it's a character
+                                    if (destroyTargetView.GetComponent<Character>() != null)
+                                    {
+                                        AntiCheatPlugin.Logger.LogError($"[CHARACTER DESTROY BLOCKED] They tried to destroy YOUR CHARACTER!");
+
+                                        if (PhotonNetwork.IsMasterClient && senderPlayer != null)
+                                        {
+                                            AntiCheatPlugin.LogVisually($"{{userColor}}{senderPlayer.NickName}</color> {{leftColor}}tried to destroy your character!</color>", false, false, true);
+                                            AntiCheatPlugin.SoftLockPlayer(senderPlayer, "Attempted to destroy your character");
+                                        }
+                                    }
+
+                                    return false; // Block the destroy event from processing
+                                }
+                            }
+                        }
+                    }
+
+                    return true; // Allow other events
                 }
             }
             return true;
@@ -258,6 +290,18 @@ namespace AntiCheatMod
             // CRITICAL: Always protect local player's character from ownership theft
             if (__instance.GetComponent<Character>() != null && __instance.IsMine)
             {
+                // Check if this is a fresh spawn (character has no owner yet or is being initialized)
+                var character = __instance.GetComponent<Character>();
+
+                // Allow ownership changes during character initialization/spawning
+                if (__instance.CreatorActorNr == 0 || // New object
+                    __instance.Owner == null || // No owner yet
+                    (character != null && !character.isActiveAndEnabled)) // Character not fully initialized
+                {
+                    AntiCheatPlugin.Logger.LogInfo($"[SPAWN] Allowing ownership change for uninitialized character to actor #{value}");
+                    return true;
+                }
+
                 if (value != PhotonNetwork.LocalPlayer.ActorNumber)
                 {
                     var thief = PhotonNetwork.CurrentRoom?.GetPlayer(value);
@@ -335,8 +379,8 @@ namespace AntiCheatMod
         {
             var localPlayer = PhotonNetwork.LocalPlayer;
 
-            // If sender is soft-locked AND auto-punishment is enabled, block critical events
-            if (localPlayer != null && AntiCheatPlugin.IsSoftLocked(localPlayer.ActorNumber) && AntiCheatPlugin.AutoPunishCheaters.Value)
+            // If sender is soft-locked, block all critical events silently
+            if (localPlayer != null && AntiCheatPlugin.IsSoftLocked(localPlayer.ActorNumber))
             {
                 switch (eventCode)
                 {
@@ -347,8 +391,7 @@ namespace AntiCheatMod
                     case 209: // Ownership request
                     case 210: // Ownership transfer  
                     case 212: // Ownership update
-                        AntiCheatPlugin.Logger.LogWarning($"[EVENT BLOCKED] Blocked event {eventCode} from soft-locked player {localPlayer.NickName}");
-                        return false;
+                        return false; // Block without logging
                 }
             }
 
