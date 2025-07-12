@@ -18,7 +18,7 @@ using Hashtable = ExitGames.Client.Photon.Hashtable;
 
 namespace AntiCheatMod
 {
-    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.1.0")]
+    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.2.0")]
     public class AntiCheatPlugin : BaseUnityPlugin, IConnectionCallbacks, IMatchmakingCallbacks, IInRoomCallbacks
     {
         public static new ManualLogSource Logger;
@@ -667,16 +667,56 @@ namespace AntiCheatMod
         }
         private void CheckSteamNameMatch(Photon.Realtime.Player player)
         {
-            // First, check against the logged Steam ID from known identities
             var identity = _knownPlayerIdentities.Find(p => p.ActorNumber == player.ActorNumber);
-            if (identity != null)
+            if (identity != null && identity.SteamID != CSteamID.Nil)
             {
-                var steamName = SteamFriends.GetFriendPersonaName(identity.SteamID);
-                if (steamName == player.NickName)
-                    return; // They match, no spoofing.
+                // Get the cached Steam name first
+                string cachedSteamName = SteamFriends.GetFriendPersonaName(identity.SteamID);
+
+                if (cachedSteamName.ToLower() == player.NickName.ToLower())
+                {
+                    // Names match (case-insensitive), all good
+                    return;
+                }
+
+                // Names don't match - could be stale cache
+                Logger.LogWarning($"Potential name mismatch for {player.NickName} - cached Steam name shows '{cachedSteamName}'");
+                LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}has potential name mismatch - verifying...</color>", true, false, false);
+
+                // Request fresh persona data (name only, no avatar)
+                bool dataRequested = SteamFriends.RequestUserInformation(identity.SteamID, true);
+
+                if (!dataRequested)
+                {
+                    // Data is already fresh (RequestUserInformation returns false if data is already available)
+                    // Double-check the name
+                    string freshSteamName = SteamFriends.GetFriendPersonaName(identity.SteamID);
+
+                    if (freshSteamName.ToLower() != player.NickName.ToLower())
+                    {
+                        // Still doesn't match after fresh data - they're cheating
+                        Logger.LogWarning($"Confirmed name mismatch: Photon='{player.NickName}' vs Steam='{freshSteamName}'");
+                        LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}confirmed name mismatch - Steam shows '{freshSteamName}'!</color>", true, false, true);
+                        SoftLockPlayer(player, "Name mismatch - spoofing detected");
+                    }
+                    else
+                    {
+                        // Names now match - was just stale cache
+                        Logger.LogInfo($"Name mismatch resolved for {player.NickName} - was stale cache");
+                        LogVisually($"{{userColor}}{player.NickName}</color> {{joinedColor}}name verified successfully</color>", true, false, false);
+                    }
+                }
+                else
+                {
+                    // Data was requested, we need to wait for PersonaStateChange callback
+                    Logger.LogInfo($"Requested fresh Steam data for {player.NickName} (Actor #{player.ActorNumber})");
+                    StartCoroutine(WaitForPersonaStateChange(player, identity.SteamID, 5f));
+                }
+
+                return;
             }
 
-            // Get current Steam lobby
+            // Fallback: Check all lobby members if we don't have the identity stored
             var lobbyHandler = GameHandler.GetService<SteamLobbyHandler>();
             if (lobbyHandler == null || !lobbyHandler.InSteamLobby(out CSteamID currentLobby))
                 return;
@@ -702,8 +742,69 @@ namespace AntiCheatMod
             if (!foundMatch)
             {
                 Logger.LogWarning($"{player.NickName} has no matching Steam name in lobby!");
-                LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}has mismatched Steam/Photon name!</color>", true, false, true);
+                LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}has no matching Steam name in lobby!</color>", true, false, true);
                 SoftLockPlayer(player, "Name mismatch - possible spoofer");
+            }
+        }
+
+        private IEnumerator WaitForPersonaStateChange(Photon.Realtime.Player player, CSteamID steamId, float timeout)
+        {
+            float startTime = Time.time;
+            string lastKnownSteamName = SteamFriends.GetFriendPersonaName(steamId);
+            bool receivedUpdate = false;
+
+            // Subscribe to Steam callbacks temporarily
+            Callback<PersonaStateChange_t> personaCallback = null;
+            personaCallback = Callback<PersonaStateChange_t>.Create((PersonaStateChange_t param) =>
+            {
+                if (param.m_ulSteamID == steamId.m_SteamID)
+                {
+                    // Check if name was part of the change
+                    if ((param.m_nChangeFlags & EPersonaChange.k_EPersonaChangeName) != 0)
+                    {
+                        receivedUpdate = true;
+                        Logger.LogInfo($"Received PersonaStateChange for {steamId} - name was updated");
+                    }
+                }
+            });
+
+            // Wait for update or timeout
+            while (!receivedUpdate && (Time.time - startTime) < timeout)
+            {
+                yield return new WaitForSeconds(0.1f);
+
+                // Also check if player left the room
+                if (PhotonNetwork.CurrentRoom == null || PhotonNetwork.CurrentRoom.GetPlayer(player.ActorNumber) == null)
+                {
+                    Logger.LogInfo($"Player {player.NickName} left before name verification completed");
+                    personaCallback?.Dispose();
+                    yield break;
+                }
+            }
+
+            // Clean up callback
+            personaCallback?.Dispose();
+
+            // Now check the name again with fresh data
+            string freshSteamName = SteamFriends.GetFriendPersonaName(steamId);
+
+            if (freshSteamName.ToLower() != player.NickName.ToLower())
+            {
+                // Still doesn't match after receiving fresh data - they're cheating
+                Logger.LogWarning($"Name mismatch confirmed after PersonaStateChange: Photon='{player.NickName}' vs Steam='{freshSteamName}'");
+                LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}confirmed spoofing - real Steam name is '{freshSteamName}'!</color>", true, false, true);
+
+                // Make sure player is still in room before soft-locking
+                if (PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.GetPlayer(player.ActorNumber) != null)
+                {
+                    SoftLockPlayer(player, $"Name spoofing confirmed - real name: {freshSteamName}");
+                }
+            }
+            else
+            {
+                // Names now match - was just stale cache
+                Logger.LogInfo($"Name verification passed for {player.NickName} after fresh data");
+                LogVisually($"{{userColor}}{player.NickName}</color> {{joinedColor}}name verified successfully</color>", true, false, false);
             }
         }
 
