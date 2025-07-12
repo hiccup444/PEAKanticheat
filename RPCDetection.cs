@@ -32,6 +32,9 @@ namespace AntiCheatMod
             public bool RequiresMasterClient { get; set; }
         }
 
+        private static Dictionary<int, DateTime> _lastOwnershipRequest = new Dictionary<int, DateTime>();
+        private static Dictionary<int, int> _ownershipRequestCount = new Dictionary<int, int>();
+
         // Dictionary to track RPC patterns and their meanings
         private static readonly Dictionary<string, RPCPattern> KnownRPCPatterns = new Dictionary<string, RPCPattern>
         {
@@ -417,6 +420,46 @@ namespace AntiCheatMod
                         return false; // Block all ownership transfers from soft-locked players
                     }
 
+                    // NEW: Rate limiting check
+                    if (_ownershipRequestCount.ContainsKey(sender))
+                    {
+                        if (_lastOwnershipRequest.ContainsKey(sender) &&
+                            (DateTime.Now - _lastOwnershipRequest[sender]).TotalSeconds < 1)
+                        {
+                            _ownershipRequestCount[sender]++;
+
+                            // If more than 5 ownership requests per second
+                            if (_ownershipRequestCount[sender] > 5)
+                            {
+                                Photon.Realtime.Player senderPlayer = PhotonNetwork.CurrentRoom?.GetPlayer(sender);
+                                if (senderPlayer != null && !senderPlayer.IsLocal)
+                                {
+                                    AntiCheatPlugin.Logger.LogWarning($"[MASS OWNERSHIP DETECTED] {senderPlayer.NickName} attempted {_ownershipRequestCount[sender]} ownership transfers in 1 second!");
+
+                                    // Only master client can punish
+                                    if (PhotonNetwork.IsMasterClient)
+                                    {
+                                        AntiCheatPlugin.LogVisually($"{{userColor}}{senderPlayer.NickName}</color> {{leftColor}}attempted mass ownership theft!</color>", false, false, true);
+                                        AntiCheatPlugin.SoftLockPlayer(senderPlayer, "Mass ownership theft attempt");
+                                    }
+
+                                    return false; // Block the ownership transfer
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Reset counter after 1 second
+                            _ownershipRequestCount[sender] = 1;
+                        }
+                    }
+                    else
+                    {
+                        _ownershipRequestCount[sender] = 1;
+                    }
+
+                    _lastOwnershipRequest[sender] = DateTime.Now;
+
                     // Second check: Is someone trying to steal YOUR character?
                     PhotonView targetView = PhotonView.Find(viewId);
                     if (targetView != null && targetView.Owner != null)
@@ -442,7 +485,6 @@ namespace AntiCheatMod
                     }
                 }
             }
-
             return true;
         }
 
@@ -458,25 +500,21 @@ namespace AntiCheatMod
                 return true;
             }
 
+            // Check if the player trying to take ownership is soft-locked
+            if (AntiCheatPlugin.IsSoftLocked(value))
+            {
+                AntiCheatPlugin.Logger.LogWarning($"[BLOCKED] Soft-locked player (actor #{value}) tried to take ownership of view {__instance.ViewID}");
+                return false;
+            }
+
             // If this is our object and someone else is trying to claim it
             if (__instance.Owner != null && __instance.Owner.IsLocal && value != PhotonNetwork.LocalPlayer.ActorNumber)
             {
-                // Check if there's a name collision with a recently joined player
-                var newOwnerPlayer = PhotonNetwork.CurrentRoom?.GetPlayer(value);
-                if (newOwnerPlayer != null)
-                {
-                    // For high ViewIDs (character spawns), check name collision
-                    if (__instance.ViewID >= 20000 && newOwnerPlayer.NickName.ToLower() == PhotonNetwork.LocalPlayer.NickName.ToLower())
-                    {
-                        AntiCheatPlugin.Logger.LogWarning($"[NAME COLLISION] Allowing ownership transfer of view {__instance.ViewID} to {newOwnerPlayer.NickName} (#{value}) to prevent character mixup");
-                        return true;
-                    }
-                }
-
-                AntiCheatPlugin.Logger.LogWarning($"[BLOCKED] Attempt to change ownership of your view {__instance.ViewID} to actor #{value}");
-                return false;
+                // Log it for debugging but DON'T block legitimate players
+                AntiCheatPlugin.Logger.LogInfo($"[OWNERSHIP] Actor #{value} taking ownership of view {__instance.ViewID} (was ours)");
             }
-            return true;
+
+            return true; // Allow all legitimate ownership transfers
         }
 
         // ===== EXISTING DETECTIONS =====
