@@ -15,6 +15,7 @@ using System.Reflection;
 using System.Text;
 using UnityEngine;
 using Hashtable = ExitGames.Client.Photon.Hashtable;
+using UnityEngine.SceneManagement;
 
 namespace AntiCheatMod
 {
@@ -77,6 +78,8 @@ namespace AntiCheatMod
 
             // Start tracking player items
             StartCoroutine(TrackPlayerItems());
+
+            SceneManager.sceneLoaded += OnSceneLoaded;
         }
 
         private void Update()
@@ -96,6 +99,7 @@ namespace AntiCheatMod
         private void OnDestroy()
         {
             PhotonNetwork.RemoveCallbackTarget(this);
+            SceneManager.sceneLoaded -= OnSceneLoaded;
         }
 
         public static void UpdatePlayerHeldItem(int actorNumber, string itemName)
@@ -991,6 +995,20 @@ namespace AntiCheatMod
             if (PhotonNetwork.IsMasterClient)
             {
                 StartCoroutine(CheckAllPlayersOnJoin());
+            }
+        }
+        public void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+        {
+            // Check if this is a game map (not lobby/menu)
+            if (scene.name.Contains("Game") || scene.name.Contains("Island") || scene.name.Contains("Map"))
+            {
+                // Give all players spawn grace period when loading into game
+                foreach (var player in PhotonNetwork.PlayerList)
+                {
+                    OnPlayerSpawned(player.ActorNumber);
+                }
+
+                Logger.LogInfo($"Entered game scene '{scene.name}' - granting spawn grace period to all players");
             }
         }
 
