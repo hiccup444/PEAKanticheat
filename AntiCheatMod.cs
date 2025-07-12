@@ -33,7 +33,7 @@ namespace AntiCheatMod
         // Config entries
         private static ConfigEntry<bool> ShowVisualLogs;
         private static ConfigEntry<bool> CheckSteamNames;
-        private static ConfigEntry<bool> AutoPunishCheaters;
+        public static ConfigEntry<bool> AutoPunishCheaters;
         public static ConfigEntry<bool> VerboseRPCLogging;
 
         // Connection log for visual messages
@@ -312,8 +312,8 @@ namespace AntiCheatMod
                 {
                     photonView.RPC("BeginIslandLoadRPC", cheater, new object[]
                     {
-                        "Pretitle",
-                        7
+                "Pretitle",
+                7
                     });
                     Logger.LogInfo($"Soft-locked cheater via kiosk: {cheater.NickName}");
                     return;
@@ -327,14 +327,30 @@ namespace AntiCheatMod
             var allCharacters = FindObjectsOfType<Character>();
             Character cheaterCharacter = null;
 
+            // ADD LOGGING: Count how many characters this player owns
+            int charactersOwned = 0;
+
             foreach (var character in allCharacters)
             {
                 var characterPhotonView = character.GetComponent<PhotonView>();
                 if (characterPhotonView != null && characterPhotonView.Owner != null && characterPhotonView.Owner.ActorNumber == cheater.ActorNumber)
                 {
-                    cheaterCharacter = character;
-                    break;
+                    charactersOwned++;
+
+                    // ADD LOGGING: Log each character owned by this player
+                    Logger.LogWarning($"[CHARACTER OWNED] Actor #{cheater.ActorNumber} ({cheater.NickName}) owns character: {character.name} (ViewID: {characterPhotonView.ViewID})");
+
+                    if (cheaterCharacter == null)
+                    {
+                        cheaterCharacter = character;
+                    }
                 }
+            }
+
+            // ADD LOGGING: Warn if player owns multiple characters
+            if (charactersOwned > 1)
+            {
+                Logger.LogError($"[WARNING] Actor #{cheater.ActorNumber} ({cheater.NickName}) owns {charactersOwned} characters! Possible ownership theft!");
             }
 
             if (cheaterCharacter != null)
@@ -344,11 +360,14 @@ namespace AntiCheatMod
                 {
                     try
                     {
+                        // ADD LOGGING: Log which character we're about to punish
+                        Logger.LogWarning($"[SOFTLOCK TARGET] About to softlock character: {cheaterCharacter.name} (ViewID: {cheaterPhotonView.ViewID}) owned by {cheater.NickName}");
+
                         // Black screen the cheater
                         cheaterPhotonView.RPC("WarpPlayerRPC", RpcTarget.All, new object[]
                         {
-                            new Vector3(float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity),
-                            true
+                    new Vector3(float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity),
+                    true
                         });
                         Logger.LogInfo($"Black screened cheater: {cheater.NickName}");
 
@@ -376,6 +395,14 @@ namespace AntiCheatMod
             }
         }
 
+        public static void AddToSoftLockList(int actorNumber)
+        {
+            if (!_softLockedPlayers.Contains(actorNumber))
+            {
+                _softLockedPlayers.Add(actorNumber);
+                Logger.LogInfo($"Added actor #{actorNumber} to soft-lock list");
+            }
+        }
         private static CSteamID GetPlayerSteamID(Photon.Realtime.Player player)
         {
             try
