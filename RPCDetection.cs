@@ -165,7 +165,7 @@ namespace AntiCheatMod
                         {
                             _ownershipRequestCount[sender]++;
 
-                            // If more than 10 ownership requests per second
+                            // If more than 5 ownership requests per second
                             if (_ownershipRequestCount[sender] > 10)
                             {
                                 Photon.Realtime.Player senderPlayer = PhotonNetwork.CurrentRoom?.GetPlayer(sender);
@@ -423,6 +423,50 @@ namespace AntiCheatMod
             return isValid;
         }
 
+        // Campfire lighting detection - only when not everyone is in range
+        [HarmonyPatch(typeof(Campfire), "Light_Rpc")]
+        [HarmonyPrefix]
+        public static bool PreCampfireLight_Rpc(Campfire __instance, PhotonMessageInfo info)
+        {
+            if (AntiCheatPlugin.VerboseRPCLogging.Value)
+                AntiCheatPlugin.Logger.LogInfo($"Campfire.Light_Rpc called by {info.Sender?.NickName}");
+
+            // Always allow if sender is null or master client
+            if (info.Sender == null || info.Sender.IsMasterClient)
+                return true;
+
+            // Check if everyone is in range using the campfire's method
+            string printout;
+            bool everyoneInRange = __instance.EveryoneInRange(out printout);
+
+            // If everyone is in range, allow the lighting
+            if (everyoneInRange)
+            {
+                if (AntiCheatPlugin.VerboseRPCLogging.Value)
+                    AntiCheatPlugin.Logger.LogInfo($"[LIGHT CAMPFIRE ALLOWED] {info.Sender.NickName} lit campfire - everyone in range");
+                return true;
+            }
+
+            // If not everyone is in range, this is a cheat attempt
+            AntiCheatPlugin.Logger.LogWarning($"[LIGHT CAMPFIRE DETECTED] {info.Sender.NickName} attempted to light {__instance.advanceToSegment} campfire with players out of range!");
+
+            // Log who was out of range
+            if (!string.IsNullOrEmpty(printout))
+            {
+                AntiCheatPlugin.Logger.LogWarning($"[LIGHT CAMPFIRE] Out of range players: {printout}");
+            }
+
+            if (PhotonNetwork.IsMasterClient)
+            {
+                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to light {__instance.advanceToSegment} campfire with players out of range!</color>", false, false, true);
+
+                // COMMENT OUT TO DISABLE PUNISHMENT
+                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized campfire lighting - players out of range");
+            }
+
+            return false; // Block the cheat attempt
+        }
+
         [HarmonyPatch(typeof(PhotonNetwork), "RaiseEventInternal")]
         [HarmonyPrefix]
         internal static bool PreRaiseEventInternal(byte eventCode, object eventContent, RaiseEventOptions raiseEventOptions, SendOptions sendOptions)
@@ -485,17 +529,17 @@ namespace AntiCheatMod
                     // Allow if they own it
                     if (photonView.Owner.ActorNumber == localPlayer.ActorNumber)
                     {
-                        AntiCheatPlugin.Logger.LogInfo($"[DESTROY ALLOWED] Blocked player destroying their own object {go.name}");
+                        // AntiCheatPlugin.Logger.LogInfo($"[DESTROY ALLOWED] Blocked player destroying their own object {go.name}");
                         return true;
                     }
 
                     // Block if they don't own it
-                    AntiCheatPlugin.Logger.LogWarning($"[DESTROY BLOCKED] Blocked player tried to remove {go.name} owned by {photonView.Owner.NickName}");
+                    // AntiCheatPlugin.Logger.LogWarning($"[DESTROY BLOCKED] Blocked player tried to remove {go.name} owned by {photonView.Owner.NickName}");
                     return false;
                 }
 
                 // Log normal destroys for debugging
-                AntiCheatPlugin.Logger.LogInfo($"[DESTROY] {localPlayer?.NickName ?? "System"} removing {go.name} owned by {photonView.Owner.NickName}");
+                // AntiCheatPlugin.Logger.LogInfo($"[DESTROY] {localPlayer?.NickName ?? "System"} removing {go.name} owned by {photonView.Owner.NickName}");
             }
 
             return true;
@@ -757,7 +801,7 @@ namespace AntiCheatMod
                 AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to make</color> {{userColor}}{victimName}</color> {{leftColor}}pass out!</color>", false, false, true);
 
                 // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized pass out on {victimName}");
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized pass out on {victimName}");
             }
 
             return false; // Block the attempt
@@ -790,7 +834,7 @@ namespace AntiCheatMod
                 AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to wake up</color> {{userColor}}{victimName}</color> {{leftColor}}without permission!</color>", false, false, true);
 
                 // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized wake up of {victimName}");
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized wake up of {victimName}");
             }
 
             return false; // Block the attempt
@@ -859,7 +903,7 @@ namespace AntiCheatMod
                 AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to make</color> {{userColor}}{victimName}</color> {{leftColor}}jump!</color>", false, false, true);
 
                 // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized jump on {victimName}");
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized jump on {victimName}");
             }
 
             return false; // Block the attempt
@@ -901,75 +945,6 @@ namespace AntiCheatMod
             return false; // Block the cheat attempt
         }
 
-        // Drop item detection
-        [HarmonyPatch(typeof(CharacterItems), "DropItemFromSlotRPC")]
-        [HarmonyPrefix]
-        public static bool PreDropItemFromSlotRPC(CharacterItems __instance, byte slotID, UnityEngine.Vector3 spawnPosition, PhotonMessageInfo info)
-        {
-            var character = __instance.GetComponent<Character>();
-            var photonView = character?.GetComponent<PhotonView>();
-            string victimName = photonView?.Owner?.NickName ?? "Unknown";
-
-            // Always allow if sender is null or master client
-            if (info.Sender == null || info.Sender.IsMasterClient)
-                return true;
-
-            // Allow if they're dropping their own item
-            if (photonView != null && info.Sender.ActorNumber == photonView.Owner.ActorNumber)
-            {
-                if (AntiCheatPlugin.VerboseRPCLogging.Value)
-                    AntiCheatPlugin.Logger.LogInfo($"[DROP ITEM ALLOWED] {info.Sender.NickName} dropped item from slot {slotID}");
-                return true;
-            }
-
-            // Log the unauthorized attempt
-            AntiCheatPlugin.Logger.LogWarning($"[DROP ITEM DETECTED] {info.Sender.NickName} attempted to drop item from {victimName}'s slot {slotID}!");
-
-            if (PhotonNetwork.IsMasterClient)
-            {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to drop item from</color> {{userColor}}{victimName}</color>{{leftColor}}'s inventory!</color>", false, false, true);
-
-                // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized item drop from {victimName}");
-            }
-
-            return false; // Block the cheat attempt
-        }
-
-        // Remove item detection
-        [HarmonyPatch(typeof(Player), "RPCRemoveItemFromSlot")]
-        [HarmonyPrefix]
-        public static bool PreRPCRemoveItemFromSlot(Player __instance, byte slotID, PhotonMessageInfo info)
-        {
-            var photonView = __instance.GetComponent<PhotonView>();
-            string victimName = photonView?.Owner?.NickName ?? "Unknown";
-
-            // Always allow if sender is null or master client
-            if (info.Sender == null || info.Sender.IsMasterClient)
-                return true;
-
-            // Allow if they're removing their own item
-            if (photonView != null && info.Sender.ActorNumber == photonView.Owner.ActorNumber)
-            {
-                if (AntiCheatPlugin.VerboseRPCLogging.Value)
-                    AntiCheatPlugin.Logger.LogInfo($"[REMOVE ITEM ALLOWED] {info.Sender.NickName} removed item from slot {slotID}");
-                return true;
-            }
-
-            // Log the unauthorized attempt
-            AntiCheatPlugin.Logger.LogWarning($"[REMOVE ITEM DETECTED] {info.Sender.NickName} attempted to remove item from {victimName}'s slot {slotID}!");
-
-            if (PhotonNetwork.IsMasterClient)
-            {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to remove item from</color> {{userColor}}{victimName}</color>{{leftColor}}'s slot {slotID}!</color>", false, false, true);
-
-                // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized item removal from {victimName}");
-            }
-
-            return false; // Block the cheat attempt
-        }
-
         // Character passed out customization detection
         [HarmonyPatch(typeof(CharacterCustomization), "CharacterPassedOut")]
         [HarmonyPrefix]
@@ -996,7 +971,7 @@ namespace AntiCheatMod
 
             if (PhotonNetwork.IsMasterClient)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to trigger pass out customization on</color> {{userColor}}{victimName}</color>{{leftColor}}!</color>", false, false, true);
+                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to render</color> {{userColor}}{victimName}</color> {{leftColor}}passed out!</color>", false, false, true);
 
                 // COMMENT OUT TO DISABLE PUNISHMENT
                 // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized pass out customization on {victimName}");
@@ -1031,7 +1006,7 @@ namespace AntiCheatMod
 
             if (PhotonNetwork.IsMasterClient)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to trigger death customization on</color> {{userColor}}{victimName}</color>{{leftColor}}!</color>", false, false, true);
+                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to render</color> {{userColor}}{victimName}</color> {{leftColor}}dead!</color>", false, false, true);
 
                 // COMMENT OUT TO DISABLE PUNISHMENT
                 // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized death customization on {victimName}");
@@ -1066,10 +1041,10 @@ namespace AntiCheatMod
 
             if (PhotonNetwork.IsMasterClient)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to play remove animation on</color> {{userColor}}{victimName}</color>{{leftColor}}!</color>", false, false, true);
+                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to play emote on</color> {{userColor}}{victimName}</color>{{leftColor}}!</color>", false, false, true);
 
                 // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized animation on {victimName}");
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized animation on {victimName}");
             }
 
             return false; // Block the cheat attempt
