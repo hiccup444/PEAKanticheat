@@ -50,7 +50,7 @@ namespace AntiCheatMod
         }
     }
 
-    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.2.0")]
+    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.3.2")]
     public class AntiCheatPlugin : BaseUnityPlugin, IConnectionCallbacks, IMatchmakingCallbacks, IInRoomCallbacks
     {
         public static new ManualLogSource Logger;
