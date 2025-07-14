@@ -19,6 +19,37 @@ using UnityEngine.SceneManagement;
 
 namespace AntiCheatMod
 {
+    // Extension method for ConfigFile compatibility
+    public static class ConfigFileExtensions
+    {
+        public static bool ContainsKey(this ConfigFile config, ConfigDefinition key)
+        {
+            try
+            {
+                // Try to get all entries and check if the key exists
+                var entries = config.GetType().GetProperty("Entries", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (entries != null)
+                {
+                    var entriesDict = entries.GetValue(config) as System.Collections.IDictionary;
+                    if (entriesDict != null)
+                    {
+                        return entriesDict.Contains(key);
+                    }
+                }
+
+                // Fallback: try to bind and see if it has a non-default value
+                var testBind = config.Bind(key.Section, key.Key, "TEST_DEFAULT");
+                bool exists = testBind.Value != "TEST_DEFAULT";
+                config.Remove(key); // Clean up test bind
+                return exists;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
     [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.2.0")]
     public class AntiCheatPlugin : BaseUnityPlugin, IConnectionCallbacks, IMatchmakingCallbacks, IInRoomCallbacks
     {
@@ -26,26 +57,30 @@ namespace AntiCheatMod
         private static AntiCheatPlugin Instance;
         private static new ConfigFile Config;
         private static readonly Dictionary<int, (string itemName, DateTime timestamp)> _playerLastHeldItems = new Dictionary<int, (string, DateTime)>();
-        public static bool IsSoftLocked(int actorNumber)
+
+        // Changed from _softLockedPlayers to _blockedPlayers for clarity
+        private static readonly HashSet<int> _blockedPlayers = new HashSet<int>();
+
+        // Track players who have been detected (regardless of whether they're blocked)
+        private static readonly HashSet<int> _detectedPlayers = new HashSet<int>();
+
+        public static bool IsBlocked(int actorNumber)
         {
-            return _softLockedPlayers.Contains(actorNumber);
+            return _blockedPlayers.Contains(actorNumber);
         }
 
         // Config entries
         private static ConfigEntry<bool> ShowVisualLogs;
         private static ConfigEntry<bool> CheckSteamNames;
-        public static ConfigEntry<bool> AutoPunishCheaters;
+        public static ConfigEntry<bool> AutoBlockCheaters; // Renamed from AutoPunishCheaters
         public static ConfigEntry<bool> VerboseRPCLogging;
 
         // Connection log for visual messages
         private static PlayerConnectionLog _connectionLog;
         private static readonly Queue<(string message, bool onlySendOnce, bool sfxJoin, bool sfxLeave)> _queuedLogs = new Queue<(string, bool, bool, bool)>(8);
 
-        // Track soft-locked players for current session only
-        private static readonly HashSet<int> _softLockedPlayers = new HashSet<int>();
         // Track player identities
         private static readonly List<PlayerIdentity> _knownPlayerIdentities = new List<PlayerIdentity>();
-
 
         // Reflection methods/fields
         private static MethodInfo _getColorTagMethod;
@@ -61,10 +96,33 @@ namespace AntiCheatMod
             Config = new ConfigFile(Path.Combine(Paths.ConfigPath, "com.hiccup444.PEAKanticheat.cfg"), true);
             ShowVisualLogs = Config.Bind("General", "ShowVisualLogs", true, "Show anti-cheat messages in the connection log");
             CheckSteamNames = Config.Bind("General", "CheckSteamNames", true, "Check if Photon names match Steam names");
-            AutoPunishCheaters = Config.Bind("General", "AutoPunishCheaters", true, "Automatically soft-lock detected cheaters");
+
+            // Handle config migration from old AutoPunishCheaters to new AutoBlockCheaters
+            bool shouldAutoBlock = true; // Default value
+
+            // Check if the old config exists
+            var oldConfigKey = new ConfigDefinition("General", "AutoPunishCheaters");
+            if (Config.ContainsKey(oldConfigKey))
+            {
+                // Read the old value
+                var oldConfig = Config.Bind("General", "AutoPunishCheaters", true, "DEPRECATED - Use AutoBlockCheaters instead");
+                shouldAutoBlock = oldConfig.Value;
+
+                // Remove the old config entry
+                Config.Remove(oldConfigKey);
+
+                Logger.LogInfo($"[CONFIG MIGRATION] Migrated AutoPunishCheaters ({shouldAutoBlock}) to AutoBlockCheaters");
+            }
+
+            // Create the new config with the migrated value
+            AutoBlockCheaters = Config.Bind("General", "AutoBlockCheaters", shouldAutoBlock, "Automatically block all RPCs from detected cheaters (replaces AutoPunishCheaters)");
+
             VerboseRPCLogging = Config.Bind("Debug", "VerboseRPCLogging", false, "Log all RPC calls for debugging");
 
-            Logger.LogInfo("[PEAKAntiCheat] Protection active!");
+            // Save the config to write any migrations
+            Config.Save();
+
+            Logger.LogInfo("[PEAKAntiCheat] Protection active! (RPC Blocking Mode)");
 
             // Apply Harmony patches
             var harmony = new Harmony("com.hiccup444.PEAKanticheat");
@@ -245,168 +303,102 @@ namespace AntiCheatMod
             }
         }
 
-        public static void SoftLockPlayer(Photon.Realtime.Player cheater, string reason)
+        // Renamed from SoftLockPlayer to BlockPlayer
+        public static void BlockPlayer(Photon.Realtime.Player cheater, string reason)
         {
-            // Never soft-lock ourselves
+            // Never block ourselves
             if (cheater.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
             {
-                Logger.LogInfo($"Not soft-locking local player");
+                Logger.LogInfo($"Not blocking local player");
                 return;
             }
 
-            // Check if already soft-locked
-            if (_softLockedPlayers.Contains(cheater.ActorNumber))
+            // Check if already detected
+            if (_detectedPlayers.Contains(cheater.ActorNumber))
             {
-                return;
+                return; // Already processed this cheater
             }
 
             Logger.LogWarning($"CHEATER DETECTED: {cheater.NickName} - Reason: {reason}");
 
-            // Add to soft-lock list for ALL players (not just master client)
-            _softLockedPlayers.Add(cheater.ActorNumber);
+            // Add to detected list to prevent re-detection spam
+            _detectedPlayers.Add(cheater.ActorNumber);
 
-            // Only master client can show visual warnings and apply punishments
-            if (!PhotonNetwork.IsMasterClient)
-            {
-                Logger.LogInfo($"Non-host detected cheater: {cheater.NickName}");
-                return;
-            }
-
+            // Compute best‐effort SteamID even on non-host clients
             CSteamID cheaterSteamID = CSteamID.Nil;
-
             var identity = _knownPlayerIdentities.Find(p => p.ActorNumber == cheater.ActorNumber);
             if (identity != null)
             {
                 cheaterSteamID = identity.SteamID;
-                Logger.LogWarning($"[SoftLock] Found identity for Actor #{cheater.ActorNumber}: PhotonName={identity.PhotonName}, SteamID={cheaterSteamID}");
-
+                Logger.LogWarning($"[Detection] Found identity for Actor #{cheater.ActorNumber}: PhotonName={identity.PhotonName}, SteamID={cheaterSteamID}");
                 if (cheaterSteamID == CSteamID.Nil)
                 {
-                    Logger.LogWarning($"[SoftLock] WARNING: Stored SteamID is NIL for {identity.PhotonName}. This likely means GetPlayerSteamID() failed during initial join.");
+                    Logger.LogWarning($"[Detection] WARNING: Stored SteamID is NIL for {identity.PhotonName}.");
                 }
             }
             else
             {
-                Logger.LogWarning($"[SoftLock] No identity found for Actor #{cheater.ActorNumber}, attempting fallback SteamID lookup...");
+                Logger.LogWarning($"[Detection] No identity found for Actor #{cheater.ActorNumber}, attempting fallback SteamID lookup...");
                 cheaterSteamID = GetPlayerSteamID(cheater);
-
                 if (cheaterSteamID == CSteamID.Nil)
                 {
-                    Logger.LogWarning($"[SoftLock] Fallback GetPlayerSteamID() also returned NIL for {cheater.NickName} (#{cheater.ActorNumber}). Steam/Photon mapping could not be resolved.");
+                    Logger.LogWarning($"[Detection] Fallback GetPlayerSteamID() returned NIL for {cheater.NickName}.");
                 }
             }
 
+            // Notify everyone, regardless of host status
             AntiCheatEvents.NotifyCheaterDetected(cheater, reason, cheaterSteamID);
 
-            if (!AutoPunishCheaters.Value)
+            if (!AutoBlockCheaters.Value)
             {
-                Logger.LogInfo($"Auto-punishment disabled - only logging cheater: {cheater.NickName}");
+                Logger.LogInfo($"Auto-blocking disabled - only logging cheater: {cheater.NickName}");
+                // Show visual warning but indicate no action taken
+                LogVisually($"{{userColor}}{cheater.NickName}</color> {{leftColor}}detected - {reason} (no action taken)</color>", false, false, true);
                 return;
             }
 
-            // Apply punishment
-            LogVisually($"{{userColor}}{cheater.NickName}</color> {{leftColor}}softlocked - {reason}</color>", false, false, true);
-
-            // Try to find AirportCheckInKiosk (only exists in airport scene)
-            var kiosk = FindObjectOfType<AirportCheckInKiosk>();
-            if (kiosk != null)
+            // Check if already blocked
+            if (_blockedPlayers.Contains(cheater.ActorNumber))
             {
-                var photonView = kiosk.GetComponent<PhotonView>();
-                if (photonView != null)
-                {
-                    photonView.RPC("BeginIslandLoadRPC", cheater, new object[]
-                    {
-                "Pretitle",
-                7
-                    });
-                    Logger.LogInfo($"Soft-locked cheater via kiosk: {cheater.NickName}");
-                    return;
-                }
+                return;
             }
 
-            // If not in airport scene, use alternative methods
-            Logger.LogInfo($"Not in airport scene, using alternative soft-lock for: {cheater.NickName}");
+            // Add to blocked list for ALL players (not just master client)
+            _blockedPlayers.Add(cheater.ActorNumber);
 
-            // Find the cheater's character
-            var allCharacters = FindObjectsOfType<Character>();
-            Character cheaterCharacter = null;
+            // Apply visual warning - changed message to reflect RPC blocking
+            LogVisually($"{{userColor}}{cheater.NickName}</color> {{leftColor}}RPC blocked - {reason}</color>", false, false, true);
 
-            // ADD LOGGING: Count how many characters this player owns
-            int charactersOwned = 0;
+            Logger.LogInfo($"All RPCs from {cheater.NickName} (Actor #{cheater.ActorNumber}) are now blocked");
+        }
 
-            foreach (var character in allCharacters)
+        // Compatibility wrapper - redirects old calls to new method
+        public static void SoftLockPlayer(Photon.Realtime.Player cheater, string reason)
+        {
+            BlockPlayer(cheater, reason);
+        }
+
+        // Compatibility wrapper
+        public static bool IsSoftLocked(int actorNumber)
+        {
+            return IsBlocked(actorNumber);
+        }
+
+        public static void AddToBlockList(int actorNumber)
+        {
+            if (!_blockedPlayers.Contains(actorNumber))
             {
-                var characterPhotonView = character.GetComponent<PhotonView>();
-                if (characterPhotonView != null && characterPhotonView.Owner != null && characterPhotonView.Owner.ActorNumber == cheater.ActorNumber)
-                {
-                    charactersOwned++;
-
-                    // ADD LOGGING: Log each character owned by this player
-                    Logger.LogWarning($"[CHARACTER OWNED] Actor #{cheater.ActorNumber} ({cheater.NickName}) owns character: {character.name} (ViewID: {characterPhotonView.ViewID})");
-
-                    if (cheaterCharacter == null)
-                    {
-                        cheaterCharacter = character;
-                    }
-                }
-            }
-
-            // ADD LOGGING: Warn if player owns multiple characters
-            if (charactersOwned > 1)
-            {
-                Logger.LogError($"[WARNING] Actor #{cheater.ActorNumber} ({cheater.NickName}) owns {charactersOwned} characters! Possible ownership theft!");
-            }
-
-            if (cheaterCharacter != null)
-            {
-                var cheaterPhotonView = cheaterCharacter.GetComponent<PhotonView>();
-                if (cheaterPhotonView != null)
-                {
-                    try
-                    {
-                        // ADD LOGGING: Log which character we're about to punish
-                        Logger.LogWarning($"[SOFTLOCK TARGET] About to softlock character: {cheaterCharacter.name} (ViewID: {cheaterPhotonView.ViewID}) owned by {cheater.NickName}");
-
-                        // Black screen the cheater
-                        cheaterPhotonView.RPC("WarpPlayerRPC", RpcTarget.All, new object[]
-                        {
-                    new Vector3(float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity),
-                    true
-                        });
-                        Logger.LogInfo($"Black screened cheater: {cheater.NickName}");
-
-                        // Try to destroy the cheater's character
-                        cheaterPhotonView.OwnershipTransfer = OwnershipOption.Request;
-                        cheaterPhotonView.OwnerActorNr = PhotonNetwork.LocalPlayer.ActorNumber;
-                        cheaterPhotonView.ControllerActorNr = PhotonNetwork.LocalPlayer.ActorNumber;
-                        cheaterPhotonView.RequestOwnership();
-                        cheaterPhotonView.TransferOwnership(PhotonNetwork.LocalPlayer);
-
-                        // Wait a frame then destroy
-                        Instance.StartCoroutine(DestroyPlayerDelayed(cheaterPhotonView));
-
-                        Logger.LogInfo($"Initiated destruction of cheater: {cheater.NickName}");
-                    }
-                    catch (System.Exception ex)
-                    {
-                        Logger.LogError($"Error applying alternative soft-lock to {cheater.NickName}: {ex.Message}");
-                    }
-                }
-            }
-            else
-            {
-                Logger.LogWarning($"Could not find character for cheater: {cheater.NickName}");
+                _blockedPlayers.Add(actorNumber);
+                Logger.LogInfo($"Added actor #{actorNumber} to RPC block list");
             }
         }
 
+        // Compatibility wrapper
         public static void AddToSoftLockList(int actorNumber)
         {
-            if (!_softLockedPlayers.Contains(actorNumber))
-            {
-                _softLockedPlayers.Add(actorNumber);
-                Logger.LogInfo($"Added actor #{actorNumber} to soft-lock list");
-            }
+            AddToBlockList(actorNumber);
         }
+
         private static CSteamID GetPlayerSteamID(Photon.Realtime.Player player)
         {
             try
@@ -495,23 +487,6 @@ namespace AntiCheatMod
             {
                 Logger.LogError($"[GetPlayerSteamID] Exception while resolving Steam ID for {player.NickName}: {ex.Message}");
                 return CSteamID.Nil;
-            }
-        }
-
-        private static IEnumerator DestroyPlayerDelayed(PhotonView cheaterPhotonView)
-        {
-            yield return new WaitForSeconds(0.1f); // Wait a frame for ownership transfer
-            try
-            {
-                if (cheaterPhotonView != null && cheaterPhotonView.IsMine)
-                {
-                    PhotonNetwork.Destroy(cheaterPhotonView);
-                    Logger.LogInfo($"Successfully destroyed cheater's character");
-                }
-            }
-            catch (System.Exception ex)
-            {
-                Logger.LogError($"Error destroying cheater's character: {ex.Message}");
             }
         }
 
@@ -604,7 +579,8 @@ namespace AntiCheatMod
             if (player.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
                 return;
 
-            if (_softLockedPlayers.Contains(player.ActorNumber))
+            // Skip if already detected (prevents spam)
+            if (_detectedPlayers.Contains(player.ActorNumber))
                 return;
 
             // Record the player's Steam ID when they first join
@@ -636,8 +612,8 @@ namespace AntiCheatMod
                     Logger.LogWarning($"{player.NickName} joined with the same name as the local player! This can cause character assignment issues.");
                     LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}joined with your name - possible impersonator!</color>", true, false, true);
 
-                    // Let them spawn first, then soft-lock them after a delay
-                    StartCoroutine(DelayedSoftLock(player, "Name impersonation - using local player's name", 3f));
+                    // Block their RPCs immediately
+                    BlockPlayer(player, "Name impersonation - using local player's name");
                     return;
                 }
                 else
@@ -651,7 +627,7 @@ namespace AntiCheatMod
             {
                 Logger.LogWarning($"{player.NickName} is using the Cherry cheat mod!");
                 LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}is using the Cherry cheat mod!</color>", true, false, true);
-                SoftLockPlayer(player, "Cherry cheat mod user");
+                BlockPlayer(player, "Cherry cheat mod user");
                 return;
             }
 
@@ -659,7 +635,7 @@ namespace AntiCheatMod
             {
                 Logger.LogWarning($"{player.NickName} is the Owner of the Cherry cheat mod!");
                 LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}is the Owner of the Cherry cheat mod!</color>", true, false, true);
-                SoftLockPlayer(player, "Cherry cheat mod owner");
+                BlockPlayer(player, "Cherry cheat mod owner");
                 return;
             }
 
@@ -667,7 +643,7 @@ namespace AntiCheatMod
             {
                 Logger.LogWarning($"{player.NickName} is using the Atlas cheat mod!");
                 LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}is using the Atlas cheat mod!</color>", true, false, true);
-                SoftLockPlayer(player, "Atlas cheat mod user");
+                BlockPlayer(player, "Atlas cheat mod user");
                 return;
             }
 
@@ -675,7 +651,7 @@ namespace AntiCheatMod
             {
                 Logger.LogWarning($"{player.NickName} is the Owner of the Atlas cheat mod!");
                 LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}is the Owner of the Atlas cheat mod!</color>", true, false, true);
-                SoftLockPlayer(player, "Atlas cheat mod owner");
+                BlockPlayer(player, "Atlas cheat mod owner");
                 return;
             }
 
@@ -686,16 +662,6 @@ namespace AntiCheatMod
             }
         }
 
-        private IEnumerator DelayedSoftLock(Photon.Realtime.Player player, string reason, float delay)
-        {
-            yield return new WaitForSeconds(delay);
-
-            // Check if they're still in the room
-            if (PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.GetPlayer(player.ActorNumber) != null)
-            {
-                SoftLockPlayer(player, reason);
-            }
-        }
         private void CheckSteamNameMatch(Photon.Realtime.Player player)
         {
             var identity = _knownPlayerIdentities.Find(p => p.ActorNumber == player.ActorNumber);
@@ -728,7 +694,7 @@ namespace AntiCheatMod
                         // Still doesn't match after fresh data - they're cheating
                         Logger.LogWarning($"Confirmed name mismatch: Photon='{player.NickName}' vs Steam='{freshSteamName}'");
                         LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}confirmed name mismatch - Steam shows '{freshSteamName}'!</color>", true, false, true);
-                        SoftLockPlayer(player, "Name mismatch - spoofing detected");
+                        BlockPlayer(player, "Name mismatch - spoofing detected");
                     }
                     else
                     {
@@ -774,7 +740,7 @@ namespace AntiCheatMod
             {
                 Logger.LogWarning($"{player.NickName} has no matching Steam name in lobby!");
                 LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}has no matching Steam name in lobby!</color>", true, false, true);
-                SoftLockPlayer(player, "Name mismatch - possible spoofer");
+                BlockPlayer(player, "Name mismatch - possible spoofer");
             }
         }
 
@@ -825,10 +791,10 @@ namespace AntiCheatMod
                 Logger.LogWarning($"Name mismatch confirmed after PersonaStateChange: Photon='{player.NickName}' vs Steam='{freshSteamName}'");
                 LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}confirmed spoofing - real Steam name is '{freshSteamName}'!</color>", true, false, true);
 
-                // Make sure player is still in room before soft-locking
+                // Make sure player is still in room before blocking
                 if (PhotonNetwork.CurrentRoom != null && PhotonNetwork.CurrentRoom.GetPlayer(player.ActorNumber) != null)
                 {
-                    SoftLockPlayer(player, $"Name spoofing confirmed - real name: {freshSteamName}");
+                    BlockPlayer(player, $"Name spoofing confirmed - real name: {freshSteamName}");
                 }
             }
             else
@@ -856,25 +822,17 @@ namespace AntiCheatMod
                         Logger.LogWarning($"Master client stolen by: {newMasterClient.NickName}");
                         LogVisually($"{{userColor}}{newMasterClient.NickName}</color> {{leftColor}}tried to take master client</color>", false, false, true);
 
-                        // Soft-lock the cheater first
-                        SoftLockPlayer(newMasterClient, "Stole master client");
+                        // Block the cheater's RPCs
+                        BlockPlayer(newMasterClient, "Stole master client");
 
-                        // Wait a moment then take master client back
-                        StartCoroutine(Reclaim_MasterClientDelayed());
+                        // Take master client back
+                        if (!PhotonNetwork.LocalPlayer.IsMasterClient)
+                        {
+                            PhotonNetwork.SetMasterClient(PhotonNetwork.LocalPlayer);
+                            Logger.LogInfo("Reclaimed master client after blocking cheater");
+                        }
                     }
                 }
-            }
-        }
-
-        private IEnumerator Reclaim_MasterClientDelayed()
-        {
-            yield return new WaitForSeconds(1f); // Wait 1 second
-
-            // Take master client back
-            if (!PhotonNetwork.LocalPlayer.IsMasterClient)
-            {
-                PhotonNetwork.SetMasterClient(PhotonNetwork.LocalPlayer);
-                Logger.LogInfo("Reclaimed master client after soft-locking cheater");
             }
         }
 
@@ -894,7 +852,8 @@ namespace AntiCheatMod
         {
             // Clear all tracking when leaving room
             _knownPlayerIdentities.Clear();
-            _softLockedPlayers.Clear();
+            _blockedPlayers.Clear();
+            _detectedPlayers.Clear();
             _playerLastHeldItems.Clear();
         }
 
@@ -932,8 +891,8 @@ namespace AntiCheatMod
                     if (photonView == null || photonView.Owner == null)
                         continue;
 
-                    // Skip soft-locked players
-                    if (IsSoftLocked(photonView.Owner.ActorNumber))
+                    // Skip blocked players
+                    if (IsBlocked(photonView.Owner.ActorNumber))
                         continue;
 
                     var characterData = character.GetComponent<CharacterData>();
@@ -951,11 +910,18 @@ namespace AntiCheatMod
 
             // Remove from held items tracking
             _playerLastHeldItems.Remove(otherPlayer.ActorNumber);
+            _recentlySpawnedPlayers.Remove(otherPlayer.ActorNumber);
 
-            if (_softLockedPlayers.Contains(otherPlayer.ActorNumber))
+            if (_blockedPlayers.Contains(otherPlayer.ActorNumber))
             {
-                _softLockedPlayers.Remove(otherPlayer.ActorNumber);
-                Logger.LogInfo($"Removed {otherPlayer.NickName} from soft-lock list (disconnected)");
+                _blockedPlayers.Remove(otherPlayer.ActorNumber);
+                Logger.LogInfo($"Removed {otherPlayer.NickName} from RPC block list (disconnected)");
+            }
+
+            if (_detectedPlayers.Contains(otherPlayer.ActorNumber))
+            {
+                _detectedPlayers.Remove(otherPlayer.ActorNumber);
+                Logger.LogInfo($"Removed {otherPlayer.NickName} from detected list (disconnected)");
             }
         }
 
@@ -966,7 +932,7 @@ namespace AntiCheatMod
             {
                 Logger.LogInfo($"Player {targetPlayer.ActorNumber} changed their name mid-game to {targetPlayer.NickName}");
 
-                if (!PhotonNetwork.IsMasterClient || targetPlayer.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
+                if (targetPlayer.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
                     return;
 
                 // Compare against the originally logged name
@@ -975,7 +941,7 @@ namespace AntiCheatMod
                 {
                     Logger.LogWarning($"{targetPlayer.ActorNumber} changed their Photon name from {identity.PhotonName} to {targetPlayer.NickName} - possible spoof attempt");
                     LogVisually($"{{userColor}}{targetPlayer.NickName}</color> {{leftColor}}name change detected - possible spoofer!</color>", true, false, true);
-                    SoftLockPlayer(targetPlayer, "Mid-game name change - possible spoofer");
+                    BlockPlayer(targetPlayer, "Mid-game name change - possible spoofer");
                     return;
                 }
 
@@ -992,11 +958,9 @@ namespace AntiCheatMod
         {
             Logger.LogInfo("Joined room - checking all existing players for cheats/spoofing");
 
-            if (PhotonNetwork.IsMasterClient)
-            {
-                StartCoroutine(CheckAllPlayersOnJoin());
-            }
+            StartCoroutine(CheckAllPlayersOnJoin());
         }
+
         public void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
             // Check if this is a game map (not lobby/menu)
@@ -1026,6 +990,7 @@ namespace AntiCheatMod
             }
         }
     }
+
     public class PlayerIdentity
     {
         public string PhotonName;
@@ -1039,5 +1004,4 @@ namespace AntiCheatMod
             SteamID = steamID;
         }
     }
-
 }
