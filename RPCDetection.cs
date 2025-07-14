@@ -970,41 +970,6 @@ namespace AntiCheatMod
             return false; // Block the cheat attempt
         }
 
-        // Destroy held item detection
-        [HarmonyPatch(typeof(CharacterItems), "DestroyHeldItemRpc")]
-        [HarmonyPrefix]
-        public static bool PreDestroyHeldItemRpc(CharacterItems __instance, PhotonMessageInfo info)
-        {
-            var character = __instance.GetComponent<Character>();
-            var photonView = character?.GetComponent<PhotonView>();
-            string victimName = photonView?.Owner?.NickName ?? "Unknown";
-
-            // Always allow if sender is null or master client
-            if (info.Sender == null || info.Sender.IsMasterClient)
-                return true;
-
-            // Allow if they're destroying their own held item
-            if (photonView != null && info.Sender.ActorNumber == photonView.Owner.ActorNumber)
-            {
-                if (AntiCheatPlugin.VerboseRPCLogging.Value)
-                    AntiCheatPlugin.Logger.LogInfo($"[DESTROY ITEM ALLOWED] {info.Sender.NickName} destroyed their held item");
-                return true;
-            }
-
-            // Log the unauthorized attempt
-            AntiCheatPlugin.Logger.LogWarning($"[DESTROY ITEM DETECTED] {info.Sender.NickName} attempted to destroy {victimName}'s held item!");
-
-            if (PhotonNetwork.IsMasterClient)
-            {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to destroy</color> {{userColor}}{victimName}</color>{{leftColor}}'s held item!</color>", false, false, true);
-
-                // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized item destruction on {victimName}");
-            }
-
-            return false; // Block the attempt
-        }
-
         // Character passed out customization detection
         [HarmonyPatch(typeof(CharacterCustomization), "CharacterPassedOut")]
         [HarmonyPrefix]
