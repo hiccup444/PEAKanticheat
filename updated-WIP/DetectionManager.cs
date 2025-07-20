@@ -16,6 +16,9 @@ namespace AntiCheatMod
         NameImpersonation,
         MidGameNameChange,
         
+        // Steam ID Spoofing
+        SteamIDSpoofing,
+        
         // RPC Abuse
         OwnershipTheft,
 
@@ -40,8 +43,7 @@ namespace AntiCheatMod
         MasterClientTheft,
         
         // Infinity/Black Screen
-        InfinityWarp,
-        BlackScreenAttempt
+        InfinityWarp
     }
 
     public class DetectionSettings
@@ -161,16 +163,31 @@ namespace AntiCheatMod
 
         public static bool ShouldAutoBlock(DetectionType type)
         {
+            // First check if detection is enabled at all
+            if (!IsDetectionEnabled(type))
+                return false;
+            
+            // Then check if auto-block is enabled for this detection
             return _detectionSettings.TryGetValue(type, out var settings) && settings.AutoBlock;
         }
 
         public static bool ShouldShowVisualWarning(DetectionType type)
         {
+            // First check if detection is enabled at all
+            if (!IsDetectionEnabled(type))
+                return false;
+            
+            // Then check if visual warning is enabled for this detection
             return _detectionSettings.TryGetValue(type, out var settings) && settings.ShowVisualWarning;
         }
 
         public static bool ShouldLogToConsole(DetectionType type)
         {
+            // First check if detection is enabled at all
+            if (!IsDetectionEnabled(type))
+                return false;
+            
+            // Then check if console logging is enabled for this detection
             return _detectionSettings.TryGetValue(type, out var settings) && settings.LogToConsole;
         }
 

@@ -134,10 +134,32 @@ namespace AntiCheatMod
 
         public static void UpdateAnticheatVersion(int actorNumber, string version)
         {
-            if (_players.TryGetValue(actorNumber, out var playerInfo))
+            if (_players.TryGetValue(actorNumber, out var player))
             {
-                playerInfo.AnticheatVersion = version;
-                OnPlayerUpdated?.Invoke(playerInfo);
+                player.AnticheatVersion = version;
+                OnPlayerUpdated?.Invoke(player);
+            }
+        }
+
+        public static void HandleMasterClientSwitch(Photon.Realtime.Player newMasterClient)
+        {
+            // Update all players to remove master client status
+            foreach (var player in _players.Values)
+            {
+                if (player.Status == PlayerStatus.MasterClient)
+                {
+                    player.Status = PlayerStatus.Normal;
+                    player.IsMasterClient = false;
+                    OnPlayerStatusChanged?.Invoke(player);
+                }
+            }
+
+            // Update the new master client
+            if (_players.TryGetValue(newMasterClient.ActorNumber, out var newMaster))
+            {
+                newMaster.Status = PlayerStatus.MasterClient;
+                newMaster.IsMasterClient = true;
+                OnPlayerStatusChanged?.Invoke(newMaster);
             }
         }
     }

@@ -172,14 +172,25 @@ namespace AntiCheatMod
                                 Photon.Realtime.Player senderPlayer = PhotonNetwork.CurrentRoom?.GetPlayer(sender);
                                 if (senderPlayer != null && !senderPlayer.IsLocal)
                                 {
-                                    AntiCheatPlugin.Logger.LogWarning($"[MASS OWNERSHIP DETECTED] {senderPlayer.NickName} attempted {_ownershipRequestCount[sender]} ownership transfers in 1 second!");
+                                    // Check detection settings
+                                    bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.OwnershipTheft);
+                                    bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.OwnershipTheft);
+                                    bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.OwnershipTheft);
 
-                                    // Only master client can punish
-                                    if (PhotonNetwork.IsMasterClient)
+                                    // Log to console if enabled
+                                    if (shouldLog)
                                     {
-                                        AntiCheatPlugin.LogVisually($"{{userColor}}{senderPlayer.NickName}</color> {{leftColor}}attempted mass ownership theft!</color>", false, false, true);
-                                        AntiCheatPlugin.BlockPlayer(senderPlayer, "Mass ownership theft attempt");
+                                        AntiCheatPlugin.Logger.LogWarning($"[MASS OWNERSHIP DETECTED] {senderPlayer.NickName} attempted {_ownershipRequestCount[sender]} ownership transfers in 1 second!");
                                     }
+
+                                    // Block player if auto-block is enabled
+                                    if (shouldBlock && PhotonNetwork.IsMasterClient)
+                                    {
+                                        AntiCheatPlugin.BlockPlayer(senderPlayer, "Mass ownership theft attempt", DetectionType.OwnershipTheft);
+                                    }
+
+                                    // Record the detection
+                                    DetectionManager.RecordDetection(DetectionType.OwnershipTheft, senderPlayer, "Mass ownership theft attempt");
 
                                     return false; // Block the ownership transfer
                                 }
@@ -210,12 +221,25 @@ namespace AntiCheatMod
                             {
                                 AntiCheatPlugin.Logger.LogWarning($"[OWNERSHIP THEFT BLOCKED] {senderPlayer.NickName} tried to steal ownership of your view {viewId}!");
 
-                                // Only show visual logs and block if we're master client
-                                if (PhotonNetwork.IsMasterClient)
+                                // Check detection settings
+                                bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.OwnershipTheft);
+                                bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.OwnershipTheft);
+                                bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.OwnershipTheft);
+
+                                // Log to console if enabled
+                                if (shouldLog)
                                 {
-                                    AntiCheatPlugin.LogVisually($"{{userColor}}{senderPlayer.NickName}</color> {{leftColor}}tried to steal your character!</color>", false, false, true);
-                                    AntiCheatPlugin.BlockPlayer(senderPlayer, "Attempted ownership theft");
+                                    AntiCheatPlugin.Logger.LogWarning($"[OWNERSHIP THEFT BLOCKED] {senderPlayer.NickName} tried to steal ownership of your view {viewId}!");
                                 }
+
+                                // Block player if auto-block is enabled
+                                if (shouldBlock && PhotonNetwork.IsMasterClient)
+                                {
+                                    AntiCheatPlugin.BlockPlayer(senderPlayer, "Attempted ownership theft", DetectionType.OwnershipTheft);
+                                }
+
+                                // Record the detection
+                                DetectionManager.RecordDetection(DetectionType.OwnershipTheft, senderPlayer, "Attempted ownership theft");
 
                                 return false; // Block the theft
                             }
@@ -244,10 +268,33 @@ namespace AntiCheatMod
                                     {
                                         AntiCheatPlugin.Logger.LogError($"[CHARACTER DESTROY BLOCKED] They tried to destroy YOUR CHARACTER!");
 
-                                        if (PhotonNetwork.IsMasterClient && senderPlayer != null)
+                                        // Check detection settings
+                                        bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedDestroy);
+                                        bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedDestroy);
+                                        bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedDestroy);
+
+                                        // Log to console if enabled
+                                        if (shouldLog)
+                                        {
+                                            AntiCheatPlugin.Logger.LogError($"[CHARACTER DESTROY BLOCKED] They tried to destroy YOUR CHARACTER!");
+                                        }
+
+                                        // Show visual log if enabled and we're master client
+                                        if (shouldShowVisual && PhotonNetwork.IsMasterClient && senderPlayer != null)
                                         {
                                             AntiCheatPlugin.LogVisually($"{{userColor}}{senderPlayer.NickName}</color> {{leftColor}}tried to destroy your character!</color>", false, false, true);
-                                            AntiCheatPlugin.BlockPlayer(senderPlayer, "Attempted to destroy your character");
+                                        }
+
+                                        // Block player if auto-block is enabled
+                                        if (shouldBlock && PhotonNetwork.IsMasterClient && senderPlayer != null)
+                                        {
+                                            AntiCheatPlugin.BlockPlayer(senderPlayer, "Attempted to destroy your character", DetectionType.UnauthorizedDestroy);
+                                        }
+
+                                        // Record the detection
+                                        if (senderPlayer != null)
+                                        {
+                                            DetectionManager.RecordDetection(DetectionType.UnauthorizedDestroy, senderPlayer, "Attempted to destroy your character");
                                         }
                                     }
 
@@ -358,11 +405,33 @@ namespace AntiCheatMod
                     var thief = PhotonNetwork.CurrentRoom?.GetPlayer(value);
                     AntiCheatPlugin.Logger.LogError($"[CHARACTER THEFT BLOCKED] {thief?.NickName ?? $"Actor {value}"} tried to steal your character!");
 
-                    // Log visual warning
-                    if (PhotonNetwork.IsMasterClient && thief != null)
+                    // Check detection settings
+                    bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.OwnershipTheft);
+                    bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.OwnershipTheft);
+                    bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.OwnershipTheft);
+
+                    // Log to console if enabled
+                    if (shouldLog)
+                    {
+                        AntiCheatPlugin.Logger.LogError($"[CHARACTER THEFT BLOCKED] {thief?.NickName ?? $"Actor {value}"} tried to steal your character!");
+                    }
+
+                    // Show visual log if enabled and we're master client
+                    if (shouldShowVisual && PhotonNetwork.IsMasterClient && thief != null)
                     {
                         AntiCheatPlugin.LogVisually($"{{userColor}}{thief.NickName}</color> {{leftColor}}tried to steal your character!</color>", false, false, true);
-                        AntiCheatPlugin.BlockPlayer(thief, "Character ownership theft attempt");
+                    }
+
+                    // Block player if auto-block is enabled
+                    if (shouldBlock && PhotonNetwork.IsMasterClient && thief != null)
+                    {
+                        AntiCheatPlugin.BlockPlayer(thief, "Character ownership theft attempt", DetectionType.OwnershipTheft);
+                    }
+
+                    // Record the detection
+                    if (thief != null)
+                    {
+                        DetectionManager.RecordDetection(DetectionType.OwnershipTheft, thief, "Character ownership theft attempt");
                     }
 
                     return false; // Block the ownership change
@@ -428,10 +497,25 @@ namespace AntiCheatMod
                 return true;
             }
 
-            // If we get here, they don't have a cookable item
-            AntiCheatPlugin.Logger.LogWarning($"{info.Sender.NickName} (#{info.Sender.ActorNumber}) tried to set the log count to {count} for the {__instance.advanceToSegment} campfire without a cookable item!");
-            AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}attempted to modify campfire logs without cookable item!</color>", false, false, true);
-            AntiCheatPlugin.BlockPlayer(info.Sender, "Campfire log manipulation - no cookable item");
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedCampfireModification);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedCampfireModification);
+            bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedCampfireModification);
+
+            // Log the unauthorized attempt
+            if (shouldLog)
+            {
+                AntiCheatPlugin.Logger.LogWarning($"[CAMPFIRE DETECTED] {info.Sender.NickName} (#{info.Sender.ActorNumber}) tried to set the log count to {count} for the {__instance.advanceToSegment} campfire without a cookable item!");
+            }
+
+            // Block player if auto-block is enabled
+            if (shouldBlock)
+            {
+                AntiCheatPlugin.BlockPlayer(info.Sender, "Campfire log manipulation - no cookable item", DetectionType.UnauthorizedCampfireModification);
+            }
+
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedCampfireModification, info.Sender, "Campfire log manipulation - no cookable item");
 
             if (PhotonNetwork.IsMasterClient)
             {
@@ -458,9 +542,26 @@ namespace AntiCheatMod
 
             if (!isValid)
             {
-                AntiCheatPlugin.Logger.LogWarning($"{info.Sender.NickName} (#{info.Sender.ActorNumber}) tried to extinguish the {__instance.advanceToSegment} campfire!");
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}attempted to extinguish the {__instance.advanceToSegment} campfire!</color>", false, false, true);
-                AntiCheatPlugin.BlockPlayer(info.Sender, "Unauthorized campfire extinguish");
+                // Check detection settings
+                bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedCampfireModification);
+                bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedCampfireModification);
+                bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedCampfireModification);
+
+                // Log the unauthorized attempt
+                if (shouldLog)
+                {
+                    AntiCheatPlugin.Logger.LogWarning($"[CAMPFIRE DETECTED] {info.Sender.NickName} (#{info.Sender.ActorNumber}) tried to extinguish the {__instance.advanceToSegment} campfire!");
+                }
+
+                // Block player if auto-block is enabled
+                if (shouldBlock)
+                {
+                    AntiCheatPlugin.BlockPlayer(info.Sender, "Unauthorized campfire extinguish", DetectionType.UnauthorizedCampfireModification);
+                }
+
+                // Record the detection
+                DetectionManager.RecordDetection(DetectionType.UnauthorizedCampfireModification, info.Sender, "Unauthorized campfire extinguish");
+
                 return false; // Block the RPC
             }
 
@@ -634,11 +735,33 @@ namespace AntiCheatMod
                 return true; // Allow the revive
             }
 
-            // Unauthorized revive attempt
-            AntiCheatPlugin.Logger.LogWarning($"{info.Sender.NickName} (#{info.Sender.ActorNumber}) attempted to revive {victimName} (#{photonView?.Owner?.ActorNumber}) without permission!");
-            AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to revive</color> {{userColor}}{victimName}</color> {{leftColor}}without permission!</color>", false, false, true);
-            AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized revive of {victimName}");
-            return false; // Block the revive
+            // Check detection is enabled at all
+            if (!DetectionManager.IsDetectionEnabled(DetectionType.UnauthorizedRevive))
+            {
+                return true; // Allow the RPC if detection is disabled
+            }
+
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedRevive);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedRevive);
+            bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedRevive);
+
+            // Log the unauthorized attempt
+            if (shouldLog)
+            {
+                AntiCheatPlugin.Logger.LogWarning($"[REVIVE DETECTED] {info.Sender.NickName} attempted unauthorized revive on {victimName}!");
+            }
+
+            // Block player if auto-block is enabled
+            if (shouldBlock)
+            {
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized revive of {victimName}", DetectionType.UnauthorizedRevive);
+            }
+
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedRevive, info.Sender, $"Unauthorized revive of {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         // Character.WarpPlayerRPC - Teleport detection
@@ -669,22 +792,27 @@ namespace AntiCheatMod
             if (isInfinityWarp)
             {
                 // NEVER allow infinity warps from non-master clients, even during spawn grace period
-                AntiCheatPlugin.Logger.LogError($"[BLACK SCREEN BLOCKED] {info.Sender.NickName} tried to warp {victimName} to infinity!");
+                AntiCheatPlugin.Logger.LogError($"[INFINITY WARP BLOCKED] {info.Sender.NickName} tried to warp {victimName} to infinity!");
 
-                if (PhotonNetwork.IsMasterClient)
+                // Check detection settings
+                bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.InfinityWarp);
+                bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.InfinityWarp);
+
+                // Log the unauthorized attempt
+                if (shouldLog)
                 {
-                    if (photonView != null && photonView.IsMine)
-                    {
-                        AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to black screen YOU!</color>", false, false, true);
-                    }
-                    else
-                    {
-                        AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to black screen</color> {{userColor}}{victimName}</color>{{leftColor}}!</color>", false, false, true);
-                    }
+                    AntiCheatPlugin.Logger.LogError($"[INFINITY WARP BLOCKED] {info.Sender.NickName} tried to warp {victimName} to infinity!");
                 }
 
-                // ALL clients block black screen attempts
-                AntiCheatPlugin.BlockPlayer(info.Sender, $"Black screen attempt on {victimName}");
+                // Block player if auto-block is enabled
+                if (shouldBlock)
+                {
+                    AntiCheatPlugin.BlockPlayer(info.Sender, $"Infinity warp attempt on {victimName}", DetectionType.InfinityWarp);
+                }
+
+                // Record the detection
+                DetectionManager.RecordDetection(DetectionType.InfinityWarp, info.Sender, $"Infinity warp attempt on {victimName}");
+
                 return false; // Always block infinity warps
             }
 
@@ -711,17 +839,27 @@ namespace AntiCheatMod
                 return true; // Allow Scout Effigy warps (except infinity)
             }
 
-            // Block unauthorized warps
-            AntiCheatPlugin.Logger.LogWarning($"[WARP BLOCKED] {info.Sender.NickName} attempted to warp {victimName} without Scout Effigy!");
+            // Check detection settings for unauthorized warp
+            bool shouldBlockWarp = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedWarp);
+            bool shouldShowVisualWarp = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedWarp);
+            bool shouldLogWarp = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedWarp);
 
-            if (PhotonNetwork.IsMasterClient)
+            // Log the unauthorized attempt
+            if (shouldLogWarp)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to warp</color> {{userColor}}{victimName}</color> {{leftColor}}without Scout Effigy!</color>", false, false, true);
+                AntiCheatPlugin.Logger.LogWarning($"[WARP DETECTED] {info.Sender.NickName} attempted to warp {victimName} without Scout Effigy!");
             }
 
-            // ALL clients block unauthorized warps
-            AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized warp of {victimName} - no Scout Effigy");
-            return false;
+            // Block player if auto-block is enabled
+            if (shouldBlockWarp)
+            {
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized warp of {victimName} - no Scout Effigy", DetectionType.UnauthorizedWarp);
+            }
+
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedWarp, info.Sender, $"Unauthorized warp of {victimName} - no Scout Effigy");
+
+            return false; // Always block the RPC call itself
         }
 
         // Revive protection
@@ -757,17 +895,28 @@ namespace AntiCheatMod
                 return true;
             }
 
-            AntiCheatPlugin.Logger.LogWarning($"[REVIVE BLOCKED] {info.Sender.NickName} attempted unauthorized revive on {victimName}!");
-
-            if (PhotonNetwork.IsMasterClient)
+            // Check if detection is enabled at all
+            if (!DetectionManager.IsDetectionEnabled(DetectionType.UnauthorizedRevive))
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to revive</color> {{userColor}}{victimName}</color> {{leftColor}}without permission!</color>", false, false, true);
+                return true; // Allow the RPC if detection is disabled
             }
 
-            // ALL clients block this
-            AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized revive of {victimName}");
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedRevive);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedRevive);
 
-            return false;
+            AntiCheatPlugin.Logger.LogWarning($"[REVIVE DETECTED] {info.Sender.NickName} attempted unauthorized revive on {victimName}!");
+
+            // Block player if auto-block is enabled
+            if (shouldBlock)
+            {
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized revive of {victimName}", DetectionType.UnauthorizedRevive);
+            }
+
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedRevive, info.Sender, $"Unauthorized revive of {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         // Character.RPCA_Die - Kill detection
@@ -787,18 +936,33 @@ namespace AntiCheatMod
             // Get the victim's name
             string victimName = photonView?.Owner?.NickName ?? "Unknown";
 
-            AntiCheatPlugin.Logger.LogWarning($"[KILL BLOCKED] {info.Sender.NickName} attempted to kill {victimName}!");
-
-            // Only show visual log if we're master client
-            if (PhotonNetwork.IsMasterClient)
+            // Check if detection is enabled at all
+            if (!DetectionManager.IsDetectionEnabled(DetectionType.UnauthorizedKill))
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to kill</color> {{userColor}}{victimName}</color>{{leftColor}}!</color>", false, false, true);
+                return true; // Allow the RPC if detection is disabled
             }
 
-            // ALL clients should block this player
-            AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized kill attempt on {victimName}");
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedKill);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedKill);
+            bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedKill);
 
-            return false;
+            // Log the unauthorized attempt
+            if (shouldLog)
+            {
+                AntiCheatPlugin.Logger.LogWarning($"[KILL DETECTED] {info.Sender.NickName} attempted to kill {victimName}!");
+            }
+
+            // Block player if auto-block is enabled
+            if (shouldBlock)
+            {
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized kill attempt on {victimName}", DetectionType.UnauthorizedKill);
+            }
+
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedKill, info.Sender, $"Unauthorized kill attempt on {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         [HarmonyPatch(typeof(CharacterAfflictions), "ApplyStatusesFromFloatArrayRPC")]
@@ -821,18 +985,27 @@ namespace AntiCheatMod
                 return true;
             }
 
-            // Block if trying to modify another player
-            AntiCheatPlugin.Logger.LogWarning($"[STATUS BLOCKED] {info.Sender.NickName} attempted to assign status effects to {targetName}!");
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedStatusEffect);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedStatusEffect);
+            bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedStatusEffect);
 
-            if (PhotonNetwork.IsMasterClient)
+            // Log the unauthorized attempt
+            if (shouldLog)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to assign status effects to</color> {{userColor}}{targetName}</color>{{leftColor}}!</color>", false, false, true);
+                AntiCheatPlugin.Logger.LogWarning($"[STATUS DETECTED] {info.Sender.NickName} attempted to assign status effects to {targetName}!");
             }
 
-            // ALL clients block this
-            AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized status assignment to {targetName}");
+            // Block player if auto-block is enabled
+            if (shouldBlock)
+            {
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized status assignment to {targetName}", DetectionType.UnauthorizedStatusEffect);
+            }
 
-            return false; // Cancel the original method
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedStatusEffect, info.Sender, $"Unauthorized status assignment to {targetName}");
+
+            return false; // Always block the RPC call itself
         }
 
         [HarmonyPatch(typeof(BananaPeel), "RPCA_TriggerBanana")]
@@ -858,15 +1031,25 @@ namespace AntiCheatMod
             if (targetView.Owner != null && info.Sender != null &&
                 targetView.Owner.ActorNumber != info.Sender.ActorNumber)
             {
-                AntiCheatPlugin.Logger.LogWarning($"[BANANA SLIP BLOCKED] {info.Sender.NickName} tried to slip {victimName}!");
+                // Check detection settings
+                bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedBananaSlip);
+                bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedBananaSlip);
+                bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedBananaSlip);
 
-                if (PhotonNetwork.IsMasterClient)
+                // Log the unauthorized attempt
+                if (shouldLog)
                 {
-                    AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to slip</color> {{userColor}}{victimName}</color> {{leftColor}}with a banana!</color>", false, false, true);
+                    AntiCheatPlugin.Logger.LogWarning($"[BANANA SLIP DETECTED] {info.Sender.NickName} tried to slip {victimName}!");
                 }
 
-                // ALL clients block this
-                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized banana slip on {victimName}");
+                // Block player if auto-block is enabled
+                if (shouldBlock)
+                {
+                    AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized banana slip on {victimName}", DetectionType.UnauthorizedBananaSlip);
+                }
+
+                // Record the detection
+                DetectionManager.RecordDetection(DetectionType.UnauthorizedBananaSlip, info.Sender, $"Unauthorized banana slip on {victimName}");
 
                 return false;
             }
@@ -896,19 +1079,27 @@ namespace AntiCheatMod
                 return true;
             }
 
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedMovement);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedMovement);
+            bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedMovement);
+
             // Log the unauthorized attempt
-            AntiCheatPlugin.Logger.LogWarning($"[PASS OUT DETECTED] {info.Sender.NickName} attempted to make {victimName} pass out!");
-
-            if (PhotonNetwork.IsMasterClient)
+            if (shouldLog)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to make</color> {{userColor}}{victimName}</color> {{leftColor}}pass out!</color>", false, false, true);
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}not punished as a false detection precaution.</color>", false, false, true);
-
-                // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized pass out on {victimName}");
+                AntiCheatPlugin.Logger.LogWarning($"[PASS OUT DETECTED] {info.Sender.NickName} attempted to make {victimName} pass out!");
             }
 
-            return false; // Block the attempt
+            // Block player if auto-block is enabled
+            if (shouldBlock)
+            {
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized pass out on {victimName}", DetectionType.UnauthorizedMovement);
+            }
+
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedMovement, info.Sender, $"Unauthorized pass out on {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         [HarmonyPatch(typeof(Character), "RPCA_UnPassOut")]
@@ -930,19 +1121,27 @@ namespace AntiCheatMod
                 return true;
             }
 
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedMovement);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedMovement);
+            bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedMovement);
+
             // Log the unauthorized attempt
-            AntiCheatPlugin.Logger.LogWarning($"[UNPASS OUT DETECTED] {info.Sender.NickName} attempted to wake up {victimName}!");
-
-            if (PhotonNetwork.IsMasterClient)
+            if (shouldLog)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to wake up</color> {{userColor}}{victimName}</color> {{leftColor}}without permission!</color>", false, false, true);
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}not punished as a false detection precaution.</color>", false, false, true);
-
-                // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized wake up of {victimName}");
+                AntiCheatPlugin.Logger.LogWarning($"[UNPASS OUT DETECTED] {info.Sender.NickName} attempted to wake up {victimName}!");
             }
 
-            return false; // Block the attempt
+            // Block player if auto-block is enabled
+            if (shouldBlock)
+            {
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized wake up of {victimName}", DetectionType.UnauthorizedMovement);
+            }
+
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedMovement, info.Sender, $"Unauthorized wake up of {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         // Character fall with screen shake detection
@@ -965,19 +1164,27 @@ namespace AntiCheatMod
                 return true;
             }
 
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedMovement);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedMovement);
+            bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedMovement);
+
             // Log the unauthorized attempt
-            AntiCheatPlugin.Logger.LogWarning($"[FALL SHAKE DETECTED] {info.Sender.NickName} attempted to make {victimName} fall with screen shake!");
-
-            if (PhotonNetwork.IsMasterClient)
+            if (shouldLog)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to make</color> {{userColor}}{victimName}</color> {{leftColor}}fall with screen shake!</color>", false, false, true);
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}not punished as a false detection precaution.</color>", false, false, true);
-
-                // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized fall with shake on {victimName}");
+                AntiCheatPlugin.Logger.LogWarning($"[FALL SHAKE DETECTED] {info.Sender.NickName} attempted to make {victimName} fall with screen shake!");
             }
 
-            return false; // Block the attempt
+            // Block player if auto-block is enabled
+            if (shouldBlock)
+            {
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized fall with shake on {victimName}", DetectionType.UnauthorizedMovement);
+            }
+
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedMovement, info.Sender, $"Unauthorized fall with shake on {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         // Jump detection
@@ -1001,18 +1208,27 @@ namespace AntiCheatMod
                 return true;
             }
 
-            // Log the unauthorized attempt
-            AntiCheatPlugin.Logger.LogWarning($"[JUMP DETECTED] {info.Sender.NickName} attempted to make {victimName} jump!");
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedMovement);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedMovement);
+            bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedMovement);
 
-            if (PhotonNetwork.IsMasterClient)
+            // Log the unauthorized attempt
+            if (shouldLog)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to make</color> {{userColor}}{victimName}</color> {{leftColor}}jump!</color>", false, false, true);
+                AntiCheatPlugin.Logger.LogWarning($"[JUMP DETECTED] {info.Sender.NickName} attempted to make {victimName} jump!");
             }
 
-            // COMMENT OUT TO DISABLE PUNISHMENT
-            AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized jump on {victimName}");
+            // Block player if auto-block is enabled
+            if (shouldBlock)
+            {
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized jump on {victimName}", DetectionType.UnauthorizedMovement);
+            }
 
-            return false; // Block the attempt
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedMovement, info.Sender, $"Unauthorized jump on {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         // Crouch detection
@@ -1036,19 +1252,28 @@ namespace AntiCheatMod
                 return true;
             }
 
-            // Log the unauthorized attempt
-            string action = setCrouch ? "crouch" : "stand up";
-            AntiCheatPlugin.Logger.LogWarning($"[CROUCH DETECTED] {info.Sender.NickName} attempted to make {victimName} {action}!");
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedMovement);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedMovement);
+            bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedMovement);
 
-            if (PhotonNetwork.IsMasterClient)
+            // Log the unauthorized attempt
+            if (shouldLog)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to make</color> {{userColor}}{victimName}</color> {{leftColor}}{action}!</color>", false, false, true);
+                string action = setCrouch ? "crouch" : "stand up";
+                AntiCheatPlugin.Logger.LogWarning($"[CROUCH DETECTED] {info.Sender.NickName} attempted to make {victimName} {action}!");
             }
 
-            // COMMENT OUT TO DISABLE PUNISHMENT
-            AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized crouch control on {victimName}");
+            // Block player if auto-block is enabled
+            if (shouldBlock)
+            {
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized crouch control on {victimName}", DetectionType.UnauthorizedMovement);
+            }
 
-            return false; // Block the cheat attempt
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedMovement, info.Sender, $"Unauthorized crouch control on {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         // Drop item detection
@@ -1072,19 +1297,28 @@ namespace AntiCheatMod
                 return true;
             }
 
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedItemDrop);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedItemDrop);
+            bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedItemDrop);
+
             // Log the unauthorized attempt
-            AntiCheatPlugin.Logger.LogWarning($"[DROP ITEM DETECTED] {info.Sender.NickName} attempted to drop item from {victimName}'s slot {slotID}!");
-
-            if (PhotonNetwork.IsMasterClient)
+            if (shouldLog)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to drop item from</color> {{userColor}}{victimName}</color>{{leftColor}}'s inventory!</color>", false, false, true);
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}not punished as a false detection precaution.</color>", false, false, true);
-
-                // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized item drop from {victimName}");
+                AntiCheatPlugin.Logger.LogWarning($"[DROP ITEM DETECTED] {info.Sender.NickName} attempted to drop item from {victimName}'s slot {slotID}!");
             }
 
-            return false; // Block the cheat attempt
+
+            // Block player if auto-block is enabled
+            if (shouldBlock)
+            {
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized item drop from {victimName}", DetectionType.UnauthorizedItemDrop);
+            }
+
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedItemDrop, info.Sender, $"Unauthorized item drop from {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         // Character passed out customization detection
@@ -1108,19 +1342,23 @@ namespace AntiCheatMod
                 return true;
             }
 
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedMovement);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedMovement);
+
             // Log the unauthorized attempt
             AntiCheatPlugin.Logger.LogWarning($"[CUSTOMIZATION PASS OUT DETECTED] {info.Sender.NickName} attempted to trigger pass out customization on {victimName}!");
 
-            if (PhotonNetwork.IsMasterClient)
+            // Block player if auto-block is enabled
+            if (shouldBlock)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to render</color> {{userColor}}{victimName}</color> {{leftColor}}passed out!</color>", false, false, true);
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}not punished as a false detection precaution.</color>", false, false, true);
-
-                // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized pass out customization on {victimName}");
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized pass out customization on {victimName}", DetectionType.UnauthorizedMovement);
             }
 
-            return false; // Block the attempt
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedMovement, info.Sender, $"Unauthorized pass out customization on {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         // Character died customization detection
@@ -1144,19 +1382,23 @@ namespace AntiCheatMod
                 return true;
             }
 
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedMovement);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedMovement);
+
             // Log the unauthorized attempt
             AntiCheatPlugin.Logger.LogWarning($"[CUSTOMIZATION DEATH DETECTED] {info.Sender.NickName} attempted to render {victimName} dead!");
 
-            if (PhotonNetwork.IsMasterClient)
+            // Block player if auto-block is enabled
+            if (shouldBlock)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to render</color> {{userColor}}{victimName}</color> {{leftColor}}dead!</color>", false, false, true);
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}not punished as a false detection precaution.</color>", false, false, true);
-
-                // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized death customization on {victimName}");
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized death customization on {victimName}", DetectionType.UnauthorizedMovement);
             }
 
-            return false; // Block the attempt
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedMovement, info.Sender, $"Unauthorized death customization on {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         // Play remove animation detection
@@ -1180,18 +1422,23 @@ namespace AntiCheatMod
                 return true;
             }
 
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedEmote);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedEmote);
+
             // Log the unauthorized attempt
             AntiCheatPlugin.Logger.LogWarning($"[PLAY REMOVE DETECTED] {info.Sender.NickName} attempted to play emote on {victimName}!");
 
-            if (PhotonNetwork.IsMasterClient)
+            // Block player if auto-block is enabled
+            if (shouldBlock)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to play emote on</color> {{userColor}}{victimName}</color>{{leftColor}}!</color>", false, false, true);
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized animation on {victimName}", DetectionType.UnauthorizedEmote);
             }
 
-            // COMMENT OUT TO DISABLE PUNISHMENT
-            AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized animation on {victimName}");
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedEmote, info.Sender, $"Unauthorized animation on {victimName}");
 
-            return false; // Block the cheat attempt
+            return false; // Always block the RPC call itself
         }
 
         // Stop climbing detection
@@ -1215,19 +1462,23 @@ namespace AntiCheatMod
                 return true;
             }
 
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedMovement);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedMovement);
+
             // Log the unauthorized attempt
             AntiCheatPlugin.Logger.LogWarning($"[STOP CLIMBING DETECTED] {info.Sender.NickName} attempted to stop {victimName}'s climbing!");
 
-            if (PhotonNetwork.IsMasterClient)
+            // Block player if auto-block is enabled
+            if (shouldBlock)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to stop</color> {{userColor}}{victimName}</color>{{leftColor}}'s climbing!</color>", false, false, true);
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}not punished as a false detection precaution.</color>", false, false, true);
-
-                // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized climbing stop on {victimName}");
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized climbing stop on {victimName}", DetectionType.UnauthorizedMovement);
             }
 
-            return false; // Block the cheat attempt
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedMovement, info.Sender, $"Unauthorized climbing stop on {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         // Stop rope climbing detection
@@ -1251,19 +1502,23 @@ namespace AntiCheatMod
                 return true;
             }
 
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedMovement);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedMovement);
+
             // Log the unauthorized attempt
             AntiCheatPlugin.Logger.LogWarning($"[STOP ROPE CLIMBING DETECTED] {info.Sender.NickName} attempted to stop {victimName}'s rope climbing!");
 
-            if (PhotonNetwork.IsMasterClient)
+            // Block player if auto-block is enabled
+            if (shouldBlock)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to stop</color> {{userColor}}{victimName}</color>{{leftColor}}'s rope climbing!</color>", false, false, true);
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}not punished as a false detection precaution.</color>", false, false, true);
-
-                // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized rope climbing stop on {victimName}");
+                AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized rope climbing stop on {victimName}", DetectionType.UnauthorizedMovement);
             }
 
-            return false; // Block the cheat attempt
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedMovement, info.Sender, $"Unauthorized rope climbing stop on {victimName}");
+
+            return false; // Always block the RPC call itself
         }
 
         // Set flare lit detection (with item check)
@@ -1305,18 +1560,23 @@ namespace AntiCheatMod
                 return true;
             }
 
+            // Check detection settings
+            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedFlareLighting);
+            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedFlareLighting);
+
             // Log the unauthorized attempt
             AntiCheatPlugin.Logger.LogWarning($"[SET FLARE DETECTED] {info.Sender.NickName} attempted to light flare without having a flare!");
 
-            if (PhotonNetwork.IsMasterClient)
+            // Block player if auto-block is enabled
+            if (shouldBlock)
             {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to light a flare without having one!</color>", false, false, true);
+                AntiCheatPlugin.BlockPlayer(info.Sender, "Unauthorized flare lighting - no flare item", DetectionType.UnauthorizedFlareLighting);
             }
 
-            // COMMENT OUT TO DISABLE PUNISHMENT
-            AntiCheatPlugin.BlockPlayer(info.Sender, "Unauthorized flare lighting - no flare item");
+            // Record the detection
+            DetectionManager.RecordDetection(DetectionType.UnauthorizedFlareLighting, info.Sender, "Unauthorized flare lighting - no flare item");
 
-            return false; // Block the cheat attempt
+            return false; // Always block the RPC call itself
         }
     }
 }

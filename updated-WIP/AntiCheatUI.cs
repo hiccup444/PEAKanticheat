@@ -4,11 +4,12 @@ using System.Collections.Generic;
 using Photon.Realtime;
 using Steamworks;
 using System;
+using System.Linq;
 using Photon.Pun;
 
 namespace AntiCheatMod
 {
-    public class AntiCheatUI : MonoBehaviour
+    public class AntiCheatUI : MonoBehaviour, IInRoomCallbacks
     {
         private bool _uiVisible = false;
         private const KeyCode TOGGLE_KEY = KeyCode.F1;
@@ -54,52 +55,73 @@ namespace AntiCheatMod
         private void OnEnable()
         {
             Debug.Log("[AntiCheatUI] OnEnable called");
+            
+            // Subscribe to master client switch events
+            PhotonNetwork.AddCallbackTarget(this);
         }
 
         private void OnDisable()
         {
             Debug.Log("[AntiCheatUI] OnDisable called");
+            
+            // Unsubscribe from master client switch events
+            PhotonNetwork.RemoveCallbackTarget(this);
         }
+
+        // Handle master client switches
+        public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
+        {
+            Debug.Log($"[AntiCheatUI] Master client switched to {newMasterClient.NickName}");
+            
+            // If we became the master client, ensure UI is available
+            if (newMasterClient.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
+            {
+                Debug.Log("[AntiCheatUI] We are now the master client - UI should be available");
+                // The UI will automatically become available on next Update() due to PhotonNetwork.IsMasterClient check
+            }
+            else
+            {
+                // Check if this might be a theft that we're about to take back
+                var lobbyHandler = GameHandler.GetService<SteamLobbyHandler>();
+                if (lobbyHandler != null && lobbyHandler.InSteamLobby(out CSteamID currentLobby))
+                {
+                    CSteamID lobbyOwner = SteamMatchmaking.GetLobbyOwner(currentLobby);
+                    
+                    // If we're the lobby owner (original master), don't hide UI yet - we might take it back
+                    if (lobbyOwner == SteamUser.GetSteamID())
+                    {
+                        Debug.Log("[AntiCheatUI] We are the lobby owner - keeping UI available in case we take master client back");
+                        return; // Don't hide UI yet
+                    }
+                }
+                
+                Debug.Log("[AntiCheatUI] We are no longer the master client - hiding UI");
+                // Hide UI if we're no longer master client
+                _uiVisible = false;
+                Cursor.visible = false;
+                Cursor.lockState = CursorLockMode.Locked;
+            }
+        }
+
+        // Called when we successfully take master client back from a thief
+        public void OnMasterClientRecovered()
+        {
+            Debug.Log("[AntiCheatUI] Master client recovered - UI should remain available");
+            // UI will automatically become available on next Update() due to PhotonNetwork.IsMasterClient check
+        }
+
+        // Required IInRoomCallbacks interface methods
+        public void OnPlayerEnteredRoom(Photon.Realtime.Player newPlayer) { }
+        public void OnPlayerLeftRoom(Photon.Realtime.Player otherPlayer) { }
+        public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged) { }
+        public void OnPlayerPropertiesUpdate(Photon.Realtime.Player targetPlayer, ExitGames.Client.Photon.Hashtable changedProps) { }
 
         private void Update()
         {
-            _updateCounter++;
-            
-            // Debug: Log every 5 seconds to confirm Update is being called
-            if (_updateCounter % 300 == 0) // Every ~5 seconds at 60fps
-            {
-                Debug.Log($"[AntiCheatUI] Update called #{_updateCounter}. GameObject active: {gameObject.activeInHierarchy}, Enabled: {enabled}");
-            }
-            
-            // Test any key press to see if input is working
-            if (Input.anyKeyDown)
-            {
-                Debug.Log($"[AntiCheatUI] Any key pressed: {Input.inputString}");
-            }
-            
-            // Toggle UI with F1 key
             if (Input.GetKeyDown(TOGGLE_KEY))
             {
                 Debug.Log($"[AntiCheatUI] F1 key pressed. IsMasterClient: {PhotonNetwork.IsMasterClient}, GameObject active: {gameObject.activeInHierarchy}");
                 ToggleUI();
-            }
-            
-            // Test F2 key as well
-            if (Input.GetKeyDown(KeyCode.F2))
-            {
-                Debug.Log($"[AntiCheatUI] F2 key pressed - testing key detection");
-                
-                // Force show UI for testing
-                if (_uiVisible)
-                {
-                    _uiVisible = false; // Force hide for testing
-                    Debug.Log($"[AntiCheatUI] Forced UI to hide via F2");
-                }
-                else
-                {
-                    _uiVisible = true; // Force show for testing
-                    Debug.Log($"[AntiCheatUI] Forced UI to show via F2");
-                }
             }
         }
 
@@ -151,9 +173,9 @@ namespace AntiCheatMod
             _scrollPosition = GUILayout.BeginScrollView(_scrollPosition, GUILayout.Height(500));
 
             // Mod Detection (Cherry + Atlas)
-            DrawGroupSlider("ModDetection", "Mod Detection (Cherry + Atlas)");
+            DrawGroupSlider("ModDetection", "Cheat Detection");
             // Spoofed Names (all name spoofing)
-            DrawGroupSlider("SpoofedNames", "Spoofed Names (All name spoofing)");
+            DrawGroupSlider("SpoofedNames", "Spoofed Names");
 
             // All other detections as individual sliders
             foreach (DetectionType type in System.Enum.GetValues(typeof(DetectionType)))
@@ -171,16 +193,25 @@ namespace AntiCheatMod
             GUILayout.Box("", GUILayout.Width(2), GUILayout.ExpandHeight(true));
 
             // --- Middle: Player List ---
-            GUILayout.BeginVertical(GUILayout.Width(280));
+            GUILayout.BeginVertical(GUILayout.Width(340));
             GUILayout.Label("Players", GUI.skin.box, GUILayout.Height(30));
             var playerScroll = GUILayout.BeginScrollView(Vector2.zero, GUILayout.Height(500));
             foreach (var player in _playerList)
             {
                 GUILayout.BeginHorizontal();
-                GUILayout.Label($"{player.PhotonName} ({player.Status})", GUILayout.Width(150));
+                string displayText;
+                if (player.Status == PlayerStatus.MasterClient)
+                {
+                    displayText = $"{player.PhotonName} (MasterClient)";
+                }
+                else
+                {
+                    displayText = $"{player.PhotonName} #{player.ActorNumber}";
+                }
+                GUILayout.Label(displayText, GUILayout.Width(250));
                 bool isBlocked = BlockingManager.IsBlocked(player.ActorNumber);
                 string buttonText = isBlocked ? "Unblock" : "Block";
-                if (GUILayout.Button(buttonText, GUILayout.Width(80)))
+                if (GUILayout.Button(buttonText, GUILayout.Width(60)))
                 {
                     if (isBlocked)
                     {
@@ -206,14 +237,14 @@ namespace AntiCheatMod
             GUILayout.Box("", GUILayout.Width(2), GUILayout.ExpandHeight(true));
 
             // --- Right: Blocked Players ---
-            GUILayout.BeginVertical(GUILayout.Width(280));
+            GUILayout.BeginVertical(GUILayout.Width(270));
             GUILayout.Label("Blocked Players", GUI.skin.box, GUILayout.Height(30));
             var blockedScroll = GUILayout.BeginScrollView(Vector2.zero, GUILayout.Height(500));
             foreach (var blockEntry in _blockedPlayers)
             {
                 GUILayout.BeginHorizontal();
-                GUILayout.Label($"{blockEntry.PlayerName} - {blockEntry.SpecificReason}", GUILayout.Width(150));
-                if (GUILayout.Button("Unblock", GUILayout.Width(80)))
+                GUILayout.Label($"{blockEntry.PlayerName} - {blockEntry.SpecificReason}", GUILayout.Width(200));
+                if (GUILayout.Button("Unblock", GUILayout.Width(60)))
                 {
                     BlockingManager.UnblockPlayer(blockEntry.ActorNumber);
                     AntiCheatPlugin.BroadcastBlockListUpdate(blockEntry.ActorNumber, false);
@@ -230,9 +261,9 @@ namespace AntiCheatMod
         private void DrawGroupSlider(string groupKey, string label)
         {
             GUILayout.BeginHorizontal();
-            GUILayout.Label(label, GUILayout.Width(250));
+            GUILayout.Label(label, GUILayout.Width(140));
             int currentValue = _groupSliders.ContainsKey(groupKey) ? _groupSliders[groupKey] : 0;
-            int newValue = (int)GUILayout.HorizontalSlider(currentValue, 0, 2, GUILayout.Width(100));
+            int newValue = (int)GUILayout.HorizontalSlider(currentValue, 0, 2, GUILayout.Width(80));
             if (newValue != currentValue)
             {
                 _groupSliders[groupKey] = newValue;
@@ -261,9 +292,9 @@ namespace AntiCheatMod
         private void DrawDetectionSlider(DetectionType type, string label)
         {
             GUILayout.BeginHorizontal();
-            GUILayout.Label(label, GUILayout.Width(250));
+            GUILayout.Label(label, GUILayout.Width(140));
             int currentValue = _individualSliders.ContainsKey(type) ? _individualSliders[type] : 0;
-            int newValue = (int)GUILayout.HorizontalSlider(currentValue, 0, 2, GUILayout.Width(100));
+            int newValue = (int)GUILayout.HorizontalSlider(currentValue, 0, 2, GUILayout.Width(80));
             if (newValue != currentValue)
             {
                 _individualSliders[type] = newValue;
@@ -292,19 +323,19 @@ namespace AntiCheatMod
                 case DetectionType.UnauthorizedMovement: return "Unauthorized Movement";
                 case DetectionType.UnauthorizedEmote: return "Unauthorized Emote";
                 case DetectionType.UnauthorizedItemDrop: return "Unauthorized Item Drop";
-                case DetectionType.UnauthorizedCampfireModification: return "Unauthorized Campfire Modification";
-                case DetectionType.UnauthorizedFlareLighting: return "Unauthorized Flare Lighting";
-                case DetectionType.UnauthorizedBananaSlip: return "Unauthorized Banana Slip";
+                case DetectionType.UnauthorizedCampfireModification: return "Unauthorized Campfire";
+                case DetectionType.UnauthorizedFlareLighting: return "Unauthorized Flare";
+                case DetectionType.UnauthorizedBananaSlip: return "Unauthorized Banana";
                 case DetectionType.MasterClientTheft: return "Master Client Theft";
+                case DetectionType.SteamIDSpoofing: return "Steam ID Spoofing";
                 case DetectionType.InfinityWarp: return "Infinity Warp";
-                case DetectionType.BlackScreenAttempt: return "Black Screen Attempt";
                 default: return type.ToString();
             }
         }
 
         private void RefreshPlayerList()
         {
-            _playerList = PlayerManager.GetAllPlayers();
+            _playerList = PlayerManager.GetAllPlayers().Where(p => !BlockingManager.IsBlocked(p.ActorNumber)).ToList();
         }
 
         private void RefreshBlockedPlayersList()
@@ -344,6 +375,7 @@ namespace AntiCheatMod
             if (_uiVisible)
             {
                 RefreshPlayerList();
+                RefreshBlockedPlayersList();
             }
         }
 
@@ -351,13 +383,18 @@ namespace AntiCheatMod
         {
             if (_uiVisible)
             {
+                RefreshPlayerList();
                 RefreshBlockedPlayersList();
             }
         }
 
         private void OnPlayerUnblocked(int actorNumber)
         {
-            RefreshBlockedPlayersList();
+            if (_uiVisible)
+            {
+                RefreshPlayerList();
+                RefreshBlockedPlayersList();
+            }
         }
 
         private void OnDestroy()
@@ -374,4 +411,4 @@ namespace AntiCheatMod
             BlockingManager.OnPlayerUnblocked -= OnPlayerUnblocked;
         }
     }
-} 
+}

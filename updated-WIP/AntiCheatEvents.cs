@@ -10,7 +10,8 @@ namespace AntiCheatMod
         DetectionSettingsUpdate = 102,
         WhitelistUpdate = 103,
         SyncRequest = 104,
-        SyncResponse = 105
+        SyncResponse = 105,
+        CheatModDetected = 106
     }
 
     public static class AntiCheatEvents

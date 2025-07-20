@@ -11,6 +11,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Text;
 using UnityEngine;
 using Hashtable = ExitGames.Client.Photon.Hashtable;
@@ -19,7 +20,7 @@ using System.Linq;
 
 namespace AntiCheatMod
 {
-    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.3.6")]
+    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.3.8")]
     public class AntiCheatPlugin : BaseUnityPlugin, IConnectionCallbacks, IMatchmakingCallbacks, IInRoomCallbacks, IOnEventCallback
     {
         public static new ManualLogSource Logger;
@@ -29,8 +30,16 @@ namespace AntiCheatMod
         // Player item tracking
         private static readonly Dictionary<int, (string itemName, DateTime timestamp, bool wasCookable)> _playerLastHeldItems = new Dictionary<int, (string, DateTime, bool)>();
 
+        // Player coordinate tracking for infinity rescue
+        private static readonly Dictionary<int, Vector3> _playerLastKnownCoordinates = new Dictionary<int, Vector3>();
+        private static readonly Dictionary<int, DateTime> _playerCoordinateTimestamps = new Dictionary<int, DateTime>();
+        private const float COORDINATE_UPDATE_INTERVAL = 10f; // Update coordinates every 10 seconds
+
+        // Item duplication prevention for blocked players
+        private static readonly Dictionary<int, GameObject> _blockedPlayerHeldItems = new Dictionary<int, GameObject>();
+
         // Plugin version
-        private const string PLUGIN_VERSION = "1.3.6";
+        private const string PLUGIN_VERSION = "1.3.8";
 
         // Custom event code for anticheat communication
         private const byte ANTICHEAT_PING_EVENT = 69;
@@ -53,6 +62,20 @@ namespace AntiCheatMod
         private static MethodInfo _getColorTagMethod;
         private static MethodInfo _addMessageMethod;
         private static FieldInfo _currentLogField;
+        
+        // Cached field info for performance
+        private static FieldInfo _joinedColorField;
+        private static FieldInfo _leftColorField;
+        private static FieldInfo _userColorField;
+        private static FieldInfo _sfxJoinField;
+        private static FieldInfo _sfxLeaveField;
+        
+        // Cached delegates for better performance
+        private static Func<object, string> _getColorTagDelegate;
+        private static Action<object, string> _addMessageDelegate;
+        
+        // Cached Steam lobby reflection for performance
+        private static FieldInfo _currentLobbyField;
 
         // Spawn grace period tracking
         private static readonly Dictionary<int, DateTime> _recentlySpawnedPlayers = new Dictionary<int, DateTime>();
@@ -62,6 +85,9 @@ namespace AntiCheatMod
         private static readonly Dictionary<int, string> _anticheatUsers = new Dictionary<int, string>();
 
         private static readonly HashSet<string> _recentDetections = new HashSet<string>();
+        
+        // Track if startup message has been shown
+        private static bool _startupMessageShown = false;
 
         private void Awake()
         {
@@ -102,21 +128,30 @@ namespace AntiCheatMod
             // Start tracking player items
             StartCoroutine(TrackPlayerItems());
 
-            SceneManager.sceneLoaded += OnSceneLoaded;
+            // Start tracking player coordinates for infinity rescue
+            StartCoroutine(TrackPlayerCoordinates());
+
+            SceneManager.activeSceneChanged += OnSceneChanged;
         }
 
-        private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+        private void OnSceneChanged(Scene oldScene, Scene newScene)
         {
-            Logger.LogInfo($"[PEAKAntiCheat] Scene loaded: {scene.name}");
+            Logger.LogInfo($"[PEAKAntiCheat] Scene changed from {oldScene.name} to {newScene.name}");
             
             // Create UI when entering game scenes
-            if (scene.name.Contains("Airport") || scene.name.Contains("Level"))
+            if (newScene.name.Contains("Airport") || newScene.name.Contains("Level"))
             {
-                Logger.LogInfo($"[PEAKAntiCheat] Game scene detected: {scene.name} - creating UI");
+                Logger.LogInfo($"[PEAKAntiCheat] Game scene detected: {newScene.name} - creating UI");
                 CreateUI();
+                
+                // Show anticheat loaded message for master client in airport scene
+                if (newScene.name.Contains("Airport") && !_startupMessageShown)
+                {
+                    StartCoroutine(ShowAnticheatLoadedMessage());
+                }
             }
             
-            if (scene.name.Contains("Level"))
+            if (newScene.name.Contains("Level"))
             {
                 foreach (var player in PhotonNetwork.PlayerList)
                 {
@@ -128,7 +163,7 @@ namespace AntiCheatMod
                     OnPlayerSpawned(PhotonNetwork.LocalPlayer.ActorNumber);
                 }
 
-                Logger.LogInfo($"Entered game scene '{scene.name}' - granting spawn grace period to all players including local");
+                Logger.LogInfo($"Entered game scene '{newScene.name}' - granting spawn grace period to all players including local");
             }
         }
 
@@ -194,6 +229,68 @@ namespace AntiCheatMod
             }
         }
 
+        private IEnumerator ShowAnticheatLoadedMessage()
+        {
+            // Mark as shown to prevent duplicate messages
+            _startupMessageShown = true;
+            
+            // Wait a short delay for the scene to fully load
+            yield return new WaitForSeconds(0.25f);
+            
+            // Wait for room state to be properly established before checking master client status
+            float roomTimeout = 10f;
+            float roomElapsed = 0f;
+            
+            while (!PhotonNetwork.InRoom && roomElapsed < roomTimeout)
+            {
+                yield return new WaitForSeconds(0.25f);
+                roomElapsed += 0.25f;
+            }
+            
+            if (!PhotonNetwork.InRoom)
+            {
+                Logger.LogWarning("[PEAKAntiCheat] Not in room after timeout, skipping anticheat loaded message");
+                yield break;
+            }
+            
+            // Now check if we're the master client
+            if (!PhotonNetwork.IsMasterClient)
+            {
+                Logger.LogInfo("[PEAKAntiCheat] Not master client, skipping anticheat loaded message");
+                yield break;
+            }
+            
+            // Wait for PlayerConnectionLog to be available
+            float timeout = 5f;
+            float elapsed = 0f;
+            
+            while (_connectionLog == null && elapsed < timeout)
+            {
+                yield return new WaitForSeconds(0.25f);
+                elapsed += 0.25f;
+                
+                // Try to find the PlayerConnectionLog
+                _connectionLog = FindObjectOfType<PlayerConnectionLog>();
+                if (_connectionLog != null)
+                {
+                    Logger.LogInfo("[PEAKAntiCheat] Found PlayerConnectionLog, initializing reflection cache");
+                    InitializeReflectionCache();
+                }
+            }
+            
+            if (_connectionLog != null)
+            {
+                Logger.LogInfo("[PEAKAntiCheat] Showing anticheat loaded message");
+                LogVisually($"{{joinedColor}}Anticheat loaded! Press F1 to open manager.</color>", false, true, false);
+            }
+            else
+            {
+                Logger.LogWarning("[PEAKAntiCheat] PlayerConnectionLog not found after timeout, message will be queued");
+                // The message will be queued and shown when PlayerConnectionLog becomes available
+                LogVisually($"{{joinedColor}}Anticheat loaded! Press F1 to open manager.</color>", false, true, false);
+            }
+        }
+
         private void InitializeDetectionManager()
         {
             // Set up default detection settings based on config
@@ -206,6 +303,8 @@ namespace AntiCheatMod
             DetectionManager.SetDetectionSettings(DetectionType.NameImpersonation, 
                 new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
             DetectionManager.SetDetectionSettings(DetectionType.MidGameNameChange, 
+                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+            DetectionManager.SetDetectionSettings(DetectionType.SteamIDSpoofing, 
                 new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
             DetectionManager.SetDetectionSettings(DetectionType.OwnershipTheft, 
                 new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
@@ -238,8 +337,6 @@ namespace AntiCheatMod
                 new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
             DetectionManager.SetDetectionSettings(DetectionType.InfinityWarp, 
                 new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.BlackScreenAttempt, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
         }
 
         private void InitializeEventHandlers()
@@ -264,12 +361,18 @@ namespace AntiCheatMod
                 }
                 _queuedLogs.Dequeue();
             }
+            
+            // Debug: Log if we have queued messages
+            if (_queuedLogs.Count > 0)
+            {
+                Logger.LogInfo($"[PEAKAntiCheat] {_queuedLogs.Count} queued messages waiting for PlayerConnectionLog");
+            }
         }
 
         private void OnDestroy()
         {
             PhotonNetwork.RemoveCallbackTarget(this);
-            SceneManager.sceneLoaded -= OnSceneLoaded;
+            SceneManager.activeSceneChanged -= OnSceneChanged;
             
             // Unsubscribe from events
             DetectionManager.OnDetectionOccurred -= OnDetectionOccurred;
@@ -300,21 +403,25 @@ namespace AntiCheatMod
 
             // Host: Handle based on detection settings
             var settings = DetectionManager.GetDetectionSettings(result.Type);
+            
             if (settings.IsEnabled)
             {
+                // Always show the initial detection message
+                LogVisually($"{{userColor}}{result.Target.NickName}</color> {{leftColor}}{result.Reason}</color>", false, false, true);
+                
                 if (settings.AutoBlock)
                 {
-                    // Auto-block mode: Block immediately
-                    BlockPlayer(result.Target, result.Reason);
+                    // Auto-block mode: Block immediately with detection type
+                    BlockPlayer(result.Target, result.Reason, result.Type);
                     LogVisually($"{{userColor}}{result.Target.NickName}</color> {{leftColor}}was auto-blocked for {result.Type}</color>", false, false, true);
                 }
                 else if (settings.ShowVisualWarning)
                 {
-                    // Warn mode: Show visual warning (prevent duplicates)
+                    // Warn mode: Show "no action taken" message (prevent duplicates)
                     string detectionKey = $"{result.Target.ActorNumber}_{result.Type}";
                     if (!_recentDetections.Contains(detectionKey))
                     {
-                        LogVisually($"{{userColor}}{result.Target.NickName}</color> {{leftColor}}detected for {result.Type}</color>", false, false, true);
+                        LogVisually($"{{userColor}}{result.Target.NickName}</color> {{leftColor}}detected - {result.Type} - no action taken</color>", false, false, true);
                         _recentDetections.Add(detectionKey);
                         StartCoroutine(RemoveDetectionFromRecent(detectionKey, 30f));
                     }
@@ -352,7 +459,7 @@ namespace AntiCheatMod
         }
 
         // Main blocking method
-        public static void BlockPlayer(Photon.Realtime.Player cheater, string reason)
+        public static void BlockPlayer(Photon.Realtime.Player cheater, string reason, DetectionType? detectionType = null)
         {
             // Never block ourselves
             if (cheater.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
@@ -368,6 +475,26 @@ namespace AntiCheatMod
                 return;
             }
 
+            // Check if we should block based on detection settings
+            bool shouldBlock = true;
+            if (detectionType.HasValue)
+            {
+                // Use individual detection setting if provided
+                shouldBlock = DetectionManager.ShouldAutoBlock(detectionType.Value);
+            }
+            else
+            {
+                // Use global setting for legacy calls
+                shouldBlock = AutoBlockCheaters.Value;
+            }
+
+            if (!shouldBlock)
+            {
+                Logger.LogInfo($"Auto-blocking disabled for this detection - only logging cheater: {cheater.NickName}");
+                return;
+            }
+
+            // Only log "CHEATER DETECTED" when we're actually going to block
             Logger.LogWarning($"CHEATER DETECTED: {cheater.NickName} - Reason: {reason}");
 
             // Compute SteamID
@@ -385,18 +512,8 @@ namespace AntiCheatMod
             // Notify the banning mod
             AntiCheatEvents.NotifyCheaterDetected(cheater, reason, cheaterSteamID);
 
-            if (!AutoBlockCheaters.Value)
-            {
-                Logger.LogInfo($"Auto-blocking disabled - only logging cheater: {cheater.NickName}");
-                LogVisually($"{{userColor}}{cheater.NickName}</color> {{leftColor}}detected - {reason} (no action taken)</color>", false, false, true);
-                return;
-            }
-
-            // Use the new blocking system
-            BlockingManager.BlockPlayer(cheater, reason, BlockReason.AutoDetection, cheaterSteamID);
-
-            // Apply visual warning
-            LogVisually($"{{userColor}}{cheater.NickName}</color> {{leftColor}}RPC blocked - {reason}</color>", false, false, true);
+            // Use the new blocking system with detection type
+            BlockingManager.BlockPlayer(cheater, reason, BlockReason.AutoDetection, cheaterSteamID, detectionType);
 
             Logger.LogInfo($"All RPCs from {cheater.NickName} (Actor #{cheater.ActorNumber}) are now blocked");
         }
@@ -442,25 +559,72 @@ namespace AntiCheatMod
         }
 
         // Visual logging
+        // Initialize cached reflection data for performance
+        private static void InitializeReflectionCache()
+        {
+            if (_connectionLog == null)
+            {
+                _connectionLog = FindObjectOfType<PlayerConnectionLog>();
+                if (_connectionLog == null)
+                {
+                    Logger.LogWarning("[PEAKAntiCheat] PlayerConnectionLog not found in scene");
+                    return;
+                }
+                Logger.LogInfo("[PEAKAntiCheat] Found PlayerConnectionLog, setting up reflection cache");
+            }
+
+            var logType = _connectionLog.GetType();
+            
+            // Cache method info
+            _getColorTagMethod = logType.GetMethod("GetColorTag", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+            _addMessageMethod = logType.GetMethod("AddMessage", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+            _currentLogField = logType.GetField("currentLog", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+            
+            // Cache field info
+            _joinedColorField = logType.GetField("joinedColor", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+            _leftColorField = logType.GetField("leftColor", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+            _userColorField = logType.GetField("userColor", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+            _sfxJoinField = logType.GetField("sfxJoin", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+            _sfxLeaveField = logType.GetField("sfxLeave", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+            
+            // Create delegates for better performance
+            try
+            {
+                if (_getColorTagMethod != null)
+                {
+                    _getColorTagDelegate = (Func<object, string>)Delegate.CreateDelegate(typeof(Func<object, string>), _connectionLog, _getColorTagMethod);
+                }
+                
+                if (_addMessageMethod != null)
+                {
+                    _addMessageDelegate = (Action<object, string>)Delegate.CreateDelegate(typeof(Action<object, string>), _connectionLog, _addMessageMethod);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"[Reflection Cache] Failed to create delegates, falling back to direct reflection: {ex.Message}");
+                _getColorTagDelegate = null;
+                _addMessageDelegate = null;
+            }
+            
+            // Note: Field getter delegates are not needed since we can use FieldInfo.GetValue directly
+            // The main performance gain comes from caching the FieldInfo objects and using delegates for methods
+        }
+
         public static bool LogVisually(string message, bool onlySendOnce = false, bool sfxJoin = false, bool sfxLeave = false)
         {
             if (!ShowVisualLogs.Value)
                 return true;
 
-            if (!_connectionLog)
+            // Initialize reflection cache if needed
+            if (_connectionLog == null || _getColorTagMethod == null || _addMessageMethod == null)
             {
-                _connectionLog = FindObjectOfType<PlayerConnectionLog>();
-                if (_connectionLog)
-                {
-                    var logType = _connectionLog.GetType();
-                    _getColorTagMethod = logType.GetMethod("GetColorTag", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                    _addMessageMethod = logType.GetMethod("AddMessage", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                    _currentLogField = logType.GetField("currentLog", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                }
+                InitializeReflectionCache();
             }
 
             if (!_connectionLog || _getColorTagMethod == null || _addMessageMethod == null)
             {
+                Logger.LogWarning($"[PEAKAntiCheat] LogVisually failed - ConnectionLog: {_connectionLog != null}, GetColorTagMethod: {_getColorTagMethod != null}, AddMessageMethod: {_addMessageMethod != null}");
                 _queuedLogs.Enqueue((message, onlySendOnce, sfxJoin, sfxLeave));
                 return false;
             }
@@ -469,19 +633,30 @@ namespace AntiCheatMod
             {
                 StringBuilder sb = new StringBuilder(message);
 
-                var joinedColorField = _connectionLog.GetType().GetField("joinedColor", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                var leftColorField = _connectionLog.GetType().GetField("leftColor", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                var userColorField = _connectionLog.GetType().GetField("userColor", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-
-                if (joinedColorField != null && leftColorField != null && userColorField != null)
+                // Use cached field info and delegates for better performance
+                if (_joinedColorField != null && _leftColorField != null && _userColorField != null)
                 {
-                    var joinedColor = joinedColorField.GetValue(_connectionLog);
-                    var leftColor = leftColorField.GetValue(_connectionLog);
-                    var userColor = userColorField.GetValue(_connectionLog);
+                    var joinedColor = _joinedColorField.GetValue(_connectionLog);
+                    var leftColor = _leftColorField.GetValue(_connectionLog);
+                    var userColor = _userColorField.GetValue(_connectionLog);
 
-                    string joinedColorTag = (string)_getColorTagMethod.Invoke(_connectionLog, new object[] { joinedColor });
-                    string leftColorTag = (string)_getColorTagMethod.Invoke(_connectionLog, new object[] { leftColor });
-                    string userColorTag = (string)_getColorTagMethod.Invoke(_connectionLog, new object[] { userColor });
+                    string joinedColorTag = "";
+                    string leftColorTag = "";
+                    string userColorTag = "";
+
+                    // Use delegate if available, otherwise fall back to reflection
+                    if (_getColorTagDelegate != null)
+                    {
+                        joinedColorTag = _getColorTagDelegate(joinedColor);
+                        leftColorTag = _getColorTagDelegate(leftColor);
+                        userColorTag = _getColorTagDelegate(userColor);
+                    }
+                    else if (_getColorTagMethod != null)
+                    {
+                        joinedColorTag = (string)_getColorTagMethod.Invoke(_connectionLog, new object[] { joinedColor });
+                        leftColorTag = (string)_getColorTagMethod.Invoke(_connectionLog, new object[] { leftColor });
+                        userColorTag = (string)_getColorTagMethod.Invoke(_connectionLog, new object[] { userColor });
+                    }
 
                     sb.Replace("{joinedColor}", joinedColorTag ?? "");
                     sb.Replace("{leftColor}", leftColorTag ?? "");
@@ -499,15 +674,20 @@ namespace AntiCheatMod
                     }
                 }
 
-                _addMessageMethod.Invoke(_connectionLog, new object[] { message });
-
-                // Handle sound effects
-                var sfxJoinField = _connectionLog.GetType().GetField("sfxJoin", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                var sfxLeaveField = _connectionLog.GetType().GetField("sfxLeave", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-
-                if (sfxJoin && sfxJoinField != null)
+                // Use cached delegate for better performance
+                if (_addMessageDelegate != null)
                 {
-                    var sfxJoinObj = sfxJoinField.GetValue(_connectionLog);
+                    _addMessageDelegate(_connectionLog, message);
+                }
+                else
+                {
+                    _addMessageMethod.Invoke(_connectionLog, new object[] { message });
+                }
+
+                // Handle sound effects with cached field info
+                if (sfxJoin && _sfxJoinField != null)
+                {
+                    var sfxJoinObj = _sfxJoinField.GetValue(_connectionLog);
                     if (sfxJoinObj != null)
                     {
                         var playMethod = sfxJoinObj.GetType().GetMethod("Play", new Type[] { typeof(Vector3) });
@@ -515,9 +695,9 @@ namespace AntiCheatMod
                     }
                 }
 
-                if (sfxLeave && sfxLeaveField != null)
+                if (sfxLeave && _sfxLeaveField != null)
                 {
-                    var sfxLeaveObj = sfxLeaveField.GetValue(_connectionLog);
+                    var sfxLeaveObj = _sfxLeaveField.GetValue(_connectionLog);
                     if (sfxLeaveObj != null)
                     {
                         var playMethod = sfxLeaveObj.GetType().GetMethod("Play", new Type[] { typeof(Vector3) });
@@ -570,16 +750,20 @@ namespace AntiCheatMod
                     return CSteamID.Nil;
                 }
 
-                var lobbyHandlerType = lobbyHandler.GetType();
-                var currentLobbyField = lobbyHandlerType.GetField("m_currentLobby", BindingFlags.NonPublic | BindingFlags.Instance);
+                // Cache the field info if not already cached
+                if (_currentLobbyField == null)
+                {
+                    var lobbyHandlerType = lobbyHandler.GetType();
+                    _currentLobbyField = lobbyHandlerType.GetField("m_currentLobby", BindingFlags.NonPublic | BindingFlags.Instance);
+                }
 
-                if (currentLobbyField == null)
+                if (_currentLobbyField == null)
                 {
                     Logger.LogError("[GetPlayerSteamID] Could not find m_currentLobby field via reflection.");
                     return CSteamID.Nil;
                 }
 
-                CSteamID currentLobby = (CSteamID)currentLobbyField.GetValue(lobbyHandler);
+                CSteamID currentLobby = (CSteamID)_currentLobbyField.GetValue(lobbyHandler);
                 if (currentLobby == CSteamID.Nil)
                 {
                     Logger.LogWarning("[GetPlayerSteamID] Current Steam lobby is NIL.");
@@ -734,7 +918,6 @@ namespace AntiCheatMod
             // NEVER check or block the master client
             if (player.IsMasterClient)
             {
-                Logger.LogInfo($"[CHECK SKIPPED] Not checking master client {player.NickName} for cheat mods");
                 return;
             }
 
@@ -783,6 +966,9 @@ namespace AntiCheatMod
             var identity = _knownPlayerIdentities.Find(p => p.ActorNumber == player.ActorNumber);
             if (identity != null && identity.SteamID != CSteamID.Nil)
             {
+                // Check for Steam ID spoofing - if someone is pretending to be the master client
+                CheckForSteamIDSpoofing(player, identity.SteamID);
+
                 bool needsRefresh = SteamFriends.RequestUserInformation(identity.SteamID, true);
 
                 if (needsRefresh)
@@ -801,6 +987,43 @@ namespace AntiCheatMod
                 Logger.LogWarning($"Name mismatch detected on join: Photon='{player.NickName}' vs Steam='{steamName}'");
                 LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}has mismatched Steam name: '{steamName}'</color>", true, false, true);
                 DetectionManager.RecordDetection(DetectionType.SteamNameMismatch, player, $"Name mismatch: Photon='{player.NickName}' vs Steam='{steamName}'");
+            }
+        }
+
+        // Check for Steam ID spoofing where someone pretends to be the master client
+        private void CheckForSteamIDSpoofing(Photon.Realtime.Player player, CSteamID playerSteamID)
+        {
+            // Only check if we're the master client and the player is not the master client
+            if (!PhotonNetwork.IsMasterClient || player.IsMasterClient)
+                return;
+
+            // Get the master client's Steam ID
+            CSteamID masterSteamID = SteamUser.GetSteamID();
+
+            // If the player's Steam ID matches the master client's Steam ID, this is a spoofing attempt
+            if (playerSteamID == masterSteamID)
+            {
+                Logger.LogError($"[STEAM ID SPOOFING DETECTED] {player.NickName} is spoofing the master client's Steam ID!");
+                LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}is spoofing the master client's Steam ID!</color>", false, false, true);
+                
+                // Check detection settings
+                bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.SteamIDSpoofing);
+                bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.SteamIDSpoofing);
+
+                // Show visual log if enabled
+                if (shouldShowVisual)
+                {
+                    LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}is spoofing the master client's Steam ID!</color>", false, false, true);
+                }
+
+                // Block player if auto-block is enabled
+                if (shouldBlock)
+                {
+                    BlockPlayer(player, "Steam ID spoofing - pretending to be master client", DetectionType.SteamIDSpoofing);
+                }
+
+                // Record the detection
+                DetectionManager.RecordDetection(DetectionType.SteamIDSpoofing, player, "Spoofed master client's Steam ID");
             }
         }
 
@@ -869,26 +1092,145 @@ namespace AntiCheatMod
         {
             Logger.LogInfo($"{newMasterClient.NickName} (#{newMasterClient.ActorNumber}) is the new master client!");
 
-            if (newMasterClient.ActorNumber != PhotonNetwork.LocalPlayer.ActorNumber && !PhotonNetwork.LocalPlayer.IsMasterClient)
-            {
-                var lobbyHandler = GameHandler.GetService<SteamLobbyHandler>();
+            // Update player status in PlayerManager
+            PlayerManager.HandleMasterClientSwitch(newMasterClient);
 
+            // CRITICAL: Check if this is a legitimate switch or theft
+            bool isLegitimateSwitch = false;
+            bool isTheft = false;
+
+            // If the new master client is the local player, this is legitimate
+            if (newMasterClient.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
+            {
+                Logger.LogInfo("[MASTER CLIENT] Local player became master client - legitimate switch");
+                isLegitimateSwitch = true;
+                
+                // Create UI for the new master client if they don't have it
+                CreateUI();
+                
+                // Send sync data to all other clients
+                StartCoroutine(SendSyncToAllClients());
+            }
+            else
+            {
+                // Check if the original master client (lobby owner) is still in the room
+                var lobbyHandler = GameHandler.GetService<SteamLobbyHandler>();
                 if (lobbyHandler != null && lobbyHandler.InSteamLobby(out CSteamID currentLobby))
                 {
-                    if (SteamMatchmaking.GetLobbyOwner(currentLobby) == SteamUser.GetSteamID())
+                    CSteamID lobbyOwner = SteamMatchmaking.GetLobbyOwner(currentLobby);
+                    
+                    // Check if the lobby owner (original master) is still in the room
+                    bool originalMasterStillInRoom = false;
+                    foreach (var player in PhotonNetwork.PlayerList)
                     {
-                        Logger.LogWarning($"Master client stolen by: {newMasterClient.NickName}");
-                        LogVisually($"{{userColor}}{newMasterClient.NickName}</color> {{leftColor}}tried to take master client</color>", false, false, true);
-
-                        DetectionManager.RecordDetection(DetectionType.MasterClientTheft, newMasterClient, "Stole master client");
-
-                        if (!PhotonNetwork.LocalPlayer.IsMasterClient)
+                        var playerSteamID = GetPlayerSteamID(player);
+                        if (playerSteamID == lobbyOwner)
                         {
-                            PhotonNetwork.SetMasterClient(PhotonNetwork.LocalPlayer);
-                            Logger.LogInfo("Reclaimed master client after blocking cheater");
+                            originalMasterStillInRoom = true;
+                            break;
                         }
                     }
+
+                    if (originalMasterStillInRoom)
+                    {
+                        // Original master is still here - this is DEFINITELY theft!
+                        Logger.LogError($"[MASTER CLIENT THEFT DETECTED] {newMasterClient.NickName} stole master client while original master is still in room!");
+                        LogVisually($"{{userColor}}{newMasterClient.NickName}</color> {{leftColor}}stole master client while original master is still here!</color>", false, false, true);
+                        
+                        // Check detection settings
+                        bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.MasterClientTheft);
+                        bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.MasterClientTheft);
+
+                        // Show visual log if enabled
+                        if (shouldShowVisual)
+                        {
+                            LogVisually($"{{userColor}}{newMasterClient.NickName}</color> {{leftColor}}stole master client while original master is still here!</color>", false, false, true);
+                        }
+
+                        // Block player if auto-block is enabled
+                        if (shouldBlock)
+                        {
+                            BlockPlayer(newMasterClient, "Master client theft - original master still in room", DetectionType.MasterClientTheft);
+                        }
+
+                        // Record the detection
+                        DetectionManager.RecordDetection(DetectionType.MasterClientTheft, newMasterClient, "Stole master client while original master still present");
+                        
+                        // Take master client back if we're the original master
+                        if (lobbyOwner == SteamUser.GetSteamID())
+                        {
+                            Logger.LogInfo("[MASTER CLIENT] Taking master client back from thief");
+                            PhotonNetwork.SetMasterClient(PhotonNetwork.LocalPlayer);
+                            
+                            // Notify UI that we recovered master client
+                            var uiObject = GameObject.Find("AntiCheatUI");
+                            if (uiObject != null)
+                            {
+                                var uiComponent = uiObject.GetComponent<AntiCheatUI>();
+                                if (uiComponent != null)
+                                {
+                                    uiComponent.OnMasterClientRecovered();
+                                }
+                            }
+                        }
+                        
+                        isTheft = true;
+                    }
+                    else
+                    {
+                        // Original master left - this is likely legitimate
+                        Logger.LogInfo("[MASTER CLIENT] Original master left - likely legitimate switch");
+                        isLegitimateSwitch = true;
+                    }
                 }
+                else
+                {
+                    // No lobby handler - check if new master has anticheat as fallback
+                    if (_anticheatUsers.ContainsKey(newMasterClient.ActorNumber))
+                    {
+                        Logger.LogInfo($"[MASTER CLIENT] New master client {newMasterClient.NickName} has anticheat - likely legitimate switch");
+                        isLegitimateSwitch = true;
+                    }
+                    else
+                    {
+                        Logger.LogWarning($"[MASTER CLIENT] New master client {newMasterClient.NickName} does not have anticheat - potential theft");
+                        LogVisually($"{{userColor}}{newMasterClient.NickName}</color> {{leftColor}}became master client without anticheat!</color>", false, false, true);
+                        DetectionManager.RecordDetection(DetectionType.MasterClientTheft, newMasterClient, "Became master client without anticheat");
+                        isTheft = true;
+                    }
+                }
+            }
+
+            // If it's a legitimate switch and the new master has anticheat, sync with them
+            if (isLegitimateSwitch && _anticheatUsers.ContainsKey(newMasterClient.ActorNumber))
+            {
+                Logger.LogInfo($"[MASTER CLIENT] Syncing with new master client {newMasterClient.NickName}");
+                
+                // Request sync from the new master client
+                if (!PhotonNetwork.IsMasterClient)
+                {
+                    PhotonNetwork.RaiseEvent((byte)AntiCheatNetEvent.SyncRequest, null, 
+                        new RaiseEventOptions { Receivers = ReceiverGroup.MasterClient }, SendOptions.SendReliable);
+                }
+            }
+        }
+
+        // Helper method to send sync data to all clients when becoming master
+        private IEnumerator SendSyncToAllClients()
+        {
+            yield return new WaitForSeconds(1f); // Small delay to ensure everything is ready
+            
+            if (PhotonNetwork.IsMasterClient)
+            {
+                Logger.LogInfo("[MASTER CLIENT] Sending sync data to all clients");
+                
+                var blockList = BlockingManager.GetAllBlockedPlayers().Select(b => b.ActorNumber).ToArray();
+                var detectionSettings = DetectionManager.SerializeSettings();
+                var whitelist = BlockingManager.GetWhitelistedSteamIDs().Select(id => (long)id).ToArray();
+
+                object[] syncData = { blockList, detectionSettings, whitelist };
+                RaiseEventOptions opts = new RaiseEventOptions { Receivers = ReceiverGroup.Others };
+                PhotonNetwork.RaiseEvent((byte)AntiCheatNetEvent.SyncResponse, syncData, opts, SendOptions.SendReliable);
             }
         }
 
@@ -912,6 +1254,12 @@ namespace AntiCheatMod
             _recentlySpawnedPlayers.Clear();
             _anticheatUsers.Clear();
             _recentDetections.Clear();
+            _playerLastKnownCoordinates.Clear();
+            _playerCoordinateTimestamps.Clear();
+            _blockedPlayerHeldItems.Clear();
+            
+            // Reset startup message flag for next session
+            _startupMessageShown = false;
         }
 
         // IInRoomCallbacks implementations
@@ -919,10 +1267,29 @@ namespace AntiCheatMod
         {
             OnPlayerSpawned(newPlayer.ActorNumber);
             PlayerManager.AddPlayer(newPlayer);
+            
+            // CRITICAL: Check for Steam ID spoofing immediately when player joins
+            if (PhotonNetwork.IsMasterClient && !newPlayer.IsMasterClient)
+            {
+                var steamID = GetPlayerSteamID(newPlayer);
+                if (steamID != CSteamID.Nil)
+                {
+                    CheckForSteamIDSpoofing(newPlayer, steamID);
+                }
+            }
+            
             StartCoroutine(CheckNewPlayerDelayed(newPlayer));
+            
+            // Send anticheat ping to the new player
             if (newPlayer.ActorNumber != PhotonNetwork.LocalPlayer.ActorNumber)
             {
                 StartCoroutine(SendAntiCheatPingToNewPlayer(newPlayer));
+            }
+            
+            // If WE are the new player, send our anticheat ping to all existing players
+            if (newPlayer.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
+            {
+                StartCoroutine(SendAntiCheatPingToAllExistingPlayers());
             }
         }
 
@@ -958,6 +1325,41 @@ namespace AntiCheatMod
             Logger.LogInfo($"[AntiCheat] Sent anticheat ping to new player {newPlayer.NickName}");
         }
 
+        private IEnumerator SendAntiCheatPingToAllExistingPlayers()
+        {
+            yield return new WaitForSeconds(2f);
+
+            if (!PhotonNetwork.IsConnected || !PhotonNetwork.InRoom || PhotonNetwork.LocalPlayer == null)
+                yield break;
+
+            // Get all existing players except ourselves
+            var existingPlayers = PhotonNetwork.CurrentRoom.Players.Values
+                .Where(p => p.ActorNumber != PhotonNetwork.LocalPlayer.ActorNumber)
+                .ToArray();
+
+            if (existingPlayers.Length == 0)
+                yield break;
+
+            object[] pingData = new object[]
+            {
+                PhotonNetwork.LocalPlayer.NickName,
+                PhotonNetwork.LocalPlayer.UserId,
+                PLUGIN_VERSION
+            };
+
+            // Send ping to each existing player
+            foreach (var player in existingPlayers)
+            {
+                RaiseEventOptions opts = new RaiseEventOptions
+                {
+                    TargetActors = new int[] { player.ActorNumber }
+                };
+
+                PhotonNetwork.RaiseEvent(ANTICHEAT_PING_EVENT, pingData, opts, SendOptions.SendReliable);
+                Logger.LogInfo($"[AntiCheat] Sent anticheat ping to existing player {player.NickName}");
+            }
+        }
+
         private IEnumerator TrackPlayerItems()
         {
             while (true)
@@ -990,11 +1392,129 @@ namespace AntiCheatMod
             }
         }
 
+        // Track player coordinates every 10 seconds for infinity rescue
+        private IEnumerator TrackPlayerCoordinates()
+        {
+            while (true)
+            {
+                yield return new WaitForSeconds(COORDINATE_UPDATE_INTERVAL);
+                if (!PhotonNetwork.InRoom)
+                    continue;
+
+                var allCharacters = FindObjectsOfType<Character>();
+                foreach (var character in allCharacters)
+                {
+                    var photonView = character.GetComponent<PhotonView>();
+                    if (photonView == null || photonView.Owner == null)
+                        continue;
+
+                    if (IsBlocked(photonView.Owner.ActorNumber))
+                        continue;
+
+                    // Store the player's current position
+                    Vector3 currentPosition = character.transform.position;
+                    _playerLastKnownCoordinates[photonView.Owner.ActorNumber] = currentPosition;
+                    _playerCoordinateTimestamps[photonView.Owner.ActorNumber] = DateTime.Now;
+
+                    // Check if player is at infinity coordinates and rescue them
+                    if (PhotonNetwork.IsMasterClient)
+                    {
+                        CheckAndRescuePlayerFromInfinity(character, photonView.Owner);
+                    }
+                }
+            }
+        }
+
+        // Check if a player is at infinity coordinates and rescue them
+        private void CheckAndRescuePlayerFromInfinity(Character character, Photon.Realtime.Player player)
+        {
+            Vector3 position = character.transform.position;
+            
+            // Check if position is infinity
+            bool isAtInfinity = float.IsInfinity(position.x) || float.IsInfinity(position.y) || float.IsInfinity(position.z) ||
+                               float.IsNegativeInfinity(position.x) || float.IsNegativeInfinity(position.y) || float.IsNegativeInfinity(position.z);
+
+            if (isAtInfinity)
+            {
+                Logger.LogWarning($"[INFINITY RESCUE] {player.NickName} is at infinity coordinates! Rescuing...");
+
+                // Get their last known safe coordinates
+                Vector3 lastKnownPosition = Vector3.zero; // Default to origin
+                if (_playerLastKnownCoordinates.TryGetValue(player.ActorNumber, out Vector3 lastPos))
+                {
+                    lastKnownPosition = lastPos;
+                }
+
+                // Teleport them back to their last known position
+                character.transform.position = lastKnownPosition;
+                
+                // Also use the game's warp system to ensure proper sync
+                try
+                {
+                    var warpMethod = character.GetType().GetMethod("WarpPlayerRPC", 
+                        new Type[] { typeof(Vector3), typeof(bool) });
+                    if (warpMethod != null)
+                    {
+                        warpMethod.Invoke(character, new object[] { lastKnownPosition, true });
+                    }
+                    else
+                    {
+                        // Fallback: just set position directly
+                        Logger.LogWarning($"[WARP FALLBACK] WarpPlayerRPC method not found, using direct position set for {player.NickName}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning($"[WARP ERROR] Failed to call WarpPlayerRPC for {player.NickName}: {ex.Message}");
+                }
+
+                Logger.LogInfo($"[INFINITY RESCUE] Rescued {player.NickName} from infinity coordinates to {lastKnownPosition}");
+                LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}was rescued from infinity coordinates!</color>", false, false, true);
+            }
+        }
+
+        // Update player's last known coordinates (called from other systems)
+        public static void UpdatePlayerCoordinates(int actorNumber, Vector3 position)
+        {
+            _playerLastKnownCoordinates[actorNumber] = position;
+            _playerCoordinateTimestamps[actorNumber] = DateTime.Now;
+        }
+
+        // Track item held by blocked player to prevent duplication
+        public static void TrackBlockedPlayerItem(int actorNumber, GameObject item)
+        {
+            if (item != null)
+            {
+                _blockedPlayerHeldItems[actorNumber] = item;
+                Logger.LogInfo($"[ITEM TRACKING] Tracking item for blocked player {actorNumber}: {item.name}");
+            }
+        }
+
+        // Clean up items when player is unblocked
+        public static void CleanupBlockedPlayerItems(int actorNumber)
+        {
+            if (_blockedPlayerHeldItems.TryGetValue(actorNumber, out GameObject trackedItem))
+            {
+                if (trackedItem != null)
+                {
+                    Logger.LogInfo($"[ITEM CLEANUP] Destroying tracked item for unblocked player {actorNumber}: {trackedItem.name}");
+                    
+                    // Destroy the tracked item to prevent duplication
+                    UnityEngine.Object.Destroy(trackedItem);
+                }
+                
+                _blockedPlayerHeldItems.Remove(actorNumber);
+            }
+        }
+
         public void OnPlayerLeftRoom(Photon.Realtime.Player otherPlayer)
         {
             _knownPlayerIdentities.RemoveAll(p => p.ActorNumber == otherPlayer.ActorNumber);
             _playerLastHeldItems.Remove(otherPlayer.ActorNumber);
             _recentlySpawnedPlayers.Remove(otherPlayer.ActorNumber);
+            _playerLastKnownCoordinates.Remove(otherPlayer.ActorNumber);
+            _playerCoordinateTimestamps.Remove(otherPlayer.ActorNumber);
+            _blockedPlayerHeldItems.Remove(otherPlayer.ActorNumber);
             PlayerManager.RemovePlayer(otherPlayer.ActorNumber);
         }
 
@@ -1042,38 +1562,90 @@ namespace AntiCheatMod
 
         public void OnRoomPropertiesUpdate(Hashtable propertiesThatChanged) { }
 
-        // --- MASTER: On join, send sync request ---
         public void OnJoinedRoom()
         {
-            Logger.LogInfo($"[AntiCheat] Joined room as {(PhotonNetwork.IsMasterClient ? "Master Client" : "Client")}");
-            
+            StartCoroutine(SendAntiCheatPingDelayed());
+
             // Add all current players to the player manager
             foreach (var player in PhotonNetwork.CurrentRoom.Players.Values)
             {
                 PlayerManager.AddPlayer(player);
             }
 
-            // --- ATLAS MOD AUTO-REVIVE TRIGGER ---
+            // --- CHEAT MOD DETECTION ---
             try
             {
-                // Only run if not master client and Atlas is present
-                if (!PhotonNetwork.IsMasterClient &&
-                    BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("synq.peak.atlas"))
+                // Only run if not master client
+                if (!PhotonNetwork.IsMasterClient)
                 {
-                    Logger.LogWarning("[AntiCheat] Atlas detected on client, sending RPCA_Revive to master client!");
-                    SendReviveRpcToMaster();
+                    var detectedMods = new List<string>();
+                    
+                    // Check for Atlas and Cherry (trigger banana slip)
+                    bool hasAtlas = BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("synq.peak.atlas");
+                    bool hasCherry = BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("Cherry.Cherry");
+
+                    if (hasAtlas || hasCherry)
+                    {
+                        string atlasCherryMods = "";
+                        if (hasAtlas && hasCherry)
+                            atlasCherryMods = "Atlas and Cherry";
+                        else if (hasAtlas)
+                            atlasCherryMods = "Atlas";
+                        else
+                            atlasCherryMods = "Cherry";
+
+                        Logger.LogWarning($"[AntiCheat] {atlasCherryMods} detected on client, will send unauthorized banana slip RPC to trigger detection!");
+                        SendBananaSlipRpcToMaster();
+                    }
+
+                    // Check for other cheat mods (visual warning only)
+                    if (BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("com.quackandcheese.ItemSpawner"))
+                        detectedMods.Add("ItemSpawner mod");
+                    
+                    if (BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("Flymod"))
+                        detectedMods.Add("Fly mod");
+                    
+                    if (BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("com.lamia.flymod"))
+                        detectedMods.Add("Fly mod");
+                    
+                    if (BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("com.mathis.infinitestamina"))
+                        detectedMods.Add("Infinite Stamina mod");
+                    
+                    if (BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("Everything"))
+                        detectedMods.Add("Miscellaneous Cheat mod");
+                    
+                    if (BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("BingBongMod"))
+                        detectedMods.Add("Miscellaneous Cheat mod");
+                    
+                    if (BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("UIOpener"))
+                        detectedMods.Add("Console Unlocker mod");
+                    
+                    if (BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("com.keklick1337.peak.advancedconsole"))
+                        detectedMods.Add("Advanced Console mod");
+
+                    // Send visual warnings to master for detected mods
+                    if (detectedMods.Count > 0)
+                    {
+                        foreach (var mod in detectedMods)
+                        {
+                            PhotonNetwork.RaiseEvent((byte)AntiCheatNetEvent.CheatModDetected, 
+                                new object[] { PhotonNetwork.LocalPlayer.NickName, mod },
+                                new RaiseEventOptions { Receivers = ReceiverGroup.MasterClient }, 
+                                SendOptions.SendReliable);
+                        }
+                    }
                 }
             }
             catch (Exception ex)
             {
-                Logger.LogError($"[AntiCheat] Error checking for Atlas or sending revive RPC: {ex}");
+                Logger.LogError($"[AntiCheat] Error checking for cheat mods: {ex}");
             }
             // --------------------------------------
 
             // Request sync from master client if we're not the master
             if (!PhotonNetwork.IsMasterClient)
             {
-                PhotonNetwork.RaiseEvent((byte)AntiCheatNetEvent.SyncRequest, null, 
+                PhotonNetwork.RaiseEvent((byte)AntiCheatNetEvent.SyncRequest, null,
                     new RaiseEventOptions { Receivers = ReceiverGroup.MasterClient }, SendOptions.SendReliable);
             }
             else
@@ -1081,7 +1653,7 @@ namespace AntiCheatMod
                 // Master client sends sync data to all clients
                 var blockList = BlockingManager.GetAllBlockedPlayers().Select(b => b.ActorNumber).ToArray();
                 var detectionSettings = DetectionManager.SerializeSettings();
-                var whitelist = BlockingManager.GetWhitelistedSteamIDs().Select(id => (long)id).ToArray(); // Convert ulong to long
+                var whitelist = BlockingManager.GetWhitelistedSteamIDs().Select(id => (long)id).ToArray();
 
                 object[] syncData = { blockList, detectionSettings, whitelist };
                 RaiseEventOptions opts = new RaiseEventOptions { Receivers = ReceiverGroup.Others };
@@ -1089,36 +1661,66 @@ namespace AntiCheatMod
             }
         }
 
-        // Helper to send RPCA_Revive to master client
-        private void SendReviveRpcToMaster()
+        private IEnumerator SendUnauthorizedBananaSlipToMaster()
         {
-            // Find the master client
-            var master = PhotonNetwork.MasterClient;
-            if (master == null || master.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
+            // Wait for characters to spawn
+            yield return new WaitForSeconds(3f);
+
+            // Find the master client's character
+            Character masterCharacter = null;
+            var allCharacters = UnityEngine.Object.FindObjectsOfType<Character>();
+
+            foreach (var character in allCharacters)
             {
-                Logger.LogWarning("[AntiCheat] No valid master client to send revive RPC to.");
-                return;
-            }
-            // Find the master client's player object (PhotonView)
-            var playerObjects = GameObject.FindObjectsOfType<MonoBehaviour>()
-                .Where(mb => mb.GetType().Name == "Player" || mb.GetType().Name.Contains("Player")).ToArray();
-            foreach (var obj in playerObjects)
-            {
-                var pv = obj.GetComponent<PhotonView>();
-                if (pv != null && pv.Owner != null && pv.Owner.ActorNumber == master.ActorNumber)
+                var pv = character.GetComponent<PhotonView>();
+                if (pv != null && pv.Owner != null && pv.Owner.IsMasterClient)
                 {
-                    // Call the revive RPC on the master client
-                    pv.RPC("RPCA_Revive", master, new object[] { true });
-                    Logger.LogWarning($"[AntiCheat] Sent RPCA_Revive to master client (Actor {master.ActorNumber})");
-                    return;
+                    masterCharacter = character;
+                    break;
                 }
             }
-            Logger.LogWarning("[AntiCheat] Could not find master client's player object to send revive RPC.");
+
+            if (masterCharacter == null)
+            {
+                Logger.LogWarning("[AntiCheat] Could not find master client's character for cheat mod detection");
+                yield break;
+            }
+
+            var masterPV = masterCharacter.GetComponent<PhotonView>();
+            if (masterPV == null)
+            {
+                Logger.LogWarning("[AntiCheat] Master client's character has no PhotonView");
+                yield break;
+            }
+
+            // Find or spawn a banana peel (like cheaters do)
+            BananaPeel bananaPeel = UnityEngine.Object.FindFirstObjectByType<BananaPeel>();
+            if (bananaPeel == null)
+            {
+                // Spawn a banana peel at the master's position
+                bananaPeel = PhotonNetwork.Instantiate("0_Items/Berrynana Peel Pink Variant", masterCharacter.Head, Quaternion.identity, 0, null).GetComponent<BananaPeel>();
+                Logger.LogWarning("[AntiCheat] Spawned banana peel for cheat detection");
+            }
+
+            Logger.LogWarning($"[AntiCheat] Cheat mod detected - sending unauthorized banana slip RPC to banana peel (ViewID: {bananaPeel.GetComponent<PhotonView>().ViewID})");
+
+            // Send banana slip RPC to trigger detection (like cheaters do)
+            bananaPeel.GetComponent<PhotonView>().RPC("RPCA_TriggerBanana", RpcTarget.All, new object[] { masterPV.ViewID });
+
+            Logger.LogWarning("[AntiCheat] Unauthorized banana slip RPC sent - should trigger detection on master client");
+        }
+
+        private void SendBananaSlipRpcToMaster()
+        {
+            // Start coroutine to wait for characters to spawn
+            StartCoroutine(SendUnauthorizedBananaSlipToMaster());
         }
 
         private IEnumerator SendAntiCheatPingDelayed()
         {
+            Logger.LogInfo($"[AntiCheat] SendAntiCheatPingDelayed started - waiting 1 second...");
             yield return new WaitForSeconds(1f);
+            Logger.LogInfo($"[AntiCheat] SendAntiCheatPingDelayed finished waiting - calling SendAntiCheatPing");
             SendAntiCheatPing();
         }
 
@@ -1136,10 +1738,11 @@ namespace AntiCheatMod
                 PhotonNetwork.LocalPlayer.UserId,
                 PLUGIN_VERSION
             };
-
             RaiseEventOptions opts = new RaiseEventOptions { Receivers = ReceiverGroup.Others };
-            PhotonNetwork.RaiseEvent(ANTICHEAT_PING_EVENT, pingData, opts, SendOptions.SendReliable);
-            Logger.LogInfo($"[AntiCheat] Sent anticheat detection ping to other players");
+
+            Logger.LogInfo($"[AntiCheat] About to send ping event with code {ANTICHEAT_PING_EVENT}");
+            bool success = PhotonNetwork.RaiseEvent(ANTICHEAT_PING_EVENT, pingData, opts, SendOptions.SendReliable);
+            Logger.LogInfo($"[AntiCheat] Sent anticheat detection ping to other players - Success: {success}");
         }
 
         private IEnumerator CheckAllPlayersOnJoin()
@@ -1157,6 +1760,14 @@ namespace AntiCheatMod
 
         public void OnEvent(EventData photonEvent)
         {
+
+            // Handle anticheat ping/pong events
+            if (photonEvent.Code == ANTICHEAT_PING_EVENT)
+            {
+                HandleAntiCheatPing(photonEvent);
+                return;
+            }
+
             var code = (AntiCheatNetEvent)photonEvent.Code;
             switch (code)
             {
@@ -1180,6 +1791,38 @@ namespace AntiCheatMod
                 case AntiCheatNetEvent.SyncResponse:
                     HandleSyncResponse(photonEvent);
                     break;
+                case AntiCheatNetEvent.CheatModDetected:
+                    if (PhotonNetwork.IsMasterClient)
+                        HandleCheatModDetected(photonEvent);
+                    break;
+            }
+        }
+
+        // Handle anticheat ping/pong events
+        private void HandleAntiCheatPing(EventData photonEvent)
+        {
+            Logger.LogInfo($"[AntiCheat] HandleAntiCheatPing called - Event from actor {photonEvent.Sender}");
+            if (photonEvent.CustomData is object[] pingData && pingData.Length >= 3)
+            {
+                string senderName = (string)pingData[0];
+                string senderUserId = (string)pingData[1];
+                string senderVersion = (string)pingData[2];
+
+                var sender = PhotonNetwork.CurrentRoom?.GetPlayer(photonEvent.Sender);
+                if (sender != null)
+                {
+                    // Store that this player has anticheat
+                    _anticheatUsers[sender.ActorNumber] = senderVersion;
+                    
+                    // Log visually for all clients (not just master)
+                    LogVisually($"{{joinedColor}}{sender.NickName}</color> {{leftColor}}has anticheat installed (v{senderVersion})</color>", false, true, false);
+                    
+                    Logger.LogInfo($"[AntiCheat] Received ping from {sender.NickName} (v{senderVersion})");
+                }
+            }
+            else
+            {
+                Logger.LogWarning($"[AntiCheat] Invalid ping data received from actor {photonEvent.Sender}");
             }
         }
 
@@ -1198,6 +1841,13 @@ namespace AntiCheatMod
         // --- CLIENT: Handle sync response ---
         private void HandleSyncResponse(EventData photonEvent)
         {
+            // SECURITY: Only accept sync responses from master client
+            if (photonEvent.Sender != PhotonNetwork.MasterClient.ActorNumber)
+            {
+                Logger.LogWarning($"[SECURITY] Blocked fake sync response from non-master client (Actor #{photonEvent.Sender})");
+                return;
+            }
+
             var data = (object[])photonEvent.CustomData;
             int[] blockList = (int[])data[0];
             object[] detectionSettings = (object[])data[1];
@@ -1231,7 +1881,7 @@ namespace AntiCheatMod
             var player = PhotonNetwork.CurrentRoom.GetPlayer(actorNumber);
             if (player != null && DetectionManager.IsDetectionEnabled(type))
             {
-                BlockPlayer(player, reason);
+                BlockPlayer(player, reason, type);
             }
         }
 
@@ -1259,6 +1909,13 @@ namespace AntiCheatMod
         // --- ALL: Handle block/unblock, detection toggle, whitelist update broadcasts ---
         private void HandleBlockListUpdate(EventData photonEvent)
         {
+            // SECURITY: Only accept block/unblock events from master client
+            if (photonEvent.Sender != PhotonNetwork.MasterClient.ActorNumber)
+            {
+                Logger.LogWarning($"[SECURITY] Blocked fake block/unblock event from non-master client (Actor #{photonEvent.Sender})");
+                return;
+            }
+
             var data = (object[])photonEvent.CustomData;
             int actorNumber = (int)data[0];
             bool isBlocked = (bool)data[1];
@@ -1269,11 +1926,37 @@ namespace AntiCheatMod
         }
         private void HandleDetectionSettingsUpdate(EventData photonEvent)
         {
+            // SECURITY: Only accept detection settings from master client
+            if (photonEvent.Sender != PhotonNetwork.MasterClient.ActorNumber)
+            {
+                Logger.LogWarning($"[SECURITY] Blocked fake detection settings event from non-master client (Actor #{photonEvent.Sender})");
+                return;
+            }
+
             object[] settings = (object[])photonEvent.CustomData;
             DetectionManager.DeserializeSettings(settings);
         }
+        private void HandleCheatModDetected(EventData photonEvent)
+        {
+            if (photonEvent.CustomData is object[] data && data.Length >= 2)
+            {
+                string playerName = (string)data[0];
+                string modName = (string)data[1];
+                
+                LogVisually($"{{userColor}}{playerName}</color> {{leftColor}}has {modName} - no action taken</color>", false, false, true);
+                Logger.LogWarning($"[AntiCheat] {playerName} has {modName} - no action taken");
+            }
+        }
+
         private void HandleWhitelistUpdate(EventData photonEvent)
         {
+            // SECURITY: Only accept whitelist updates from master client
+            if (photonEvent.Sender != PhotonNetwork.MasterClient.ActorNumber)
+            {
+                Logger.LogWarning($"[SECURITY] Blocked fake whitelist event from non-master client (Actor #{photonEvent.Sender})");
+                return;
+            }
+
             long[] whitelistLong = (long[])photonEvent.CustomData; // Receive as long array
             // Convert long back to ulong
             ulong[] whitelist = whitelistLong.Select(id => (ulong)id).ToArray();

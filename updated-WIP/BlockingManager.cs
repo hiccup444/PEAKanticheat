@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Photon.Realtime;
 using Steamworks;
+using Photon.Pun;
 
 namespace AntiCheatMod
 {
@@ -38,8 +40,8 @@ namespace AntiCheatMod
     {
         private static readonly Dictionary<int, BlockEntry> _blockedPlayers = new Dictionary<int, BlockEntry>();
         private static readonly HashSet<ulong> _whitelistedSteamIDs = new HashSet<ulong>();
-        // Track recently unblocked players to prevent immediate re-blocking
-        private static readonly HashSet<int> _recentlyUnblocked = new HashSet<int>();
+        // Track recently unblocked players by detection type to prevent immediate re-blocking for the same reason
+        private static readonly Dictionary<int, HashSet<DetectionType>> _recentlyUnblockedDetections = new Dictionary<int, HashSet<DetectionType>>();
         
         // Events for UI updates
         public static event Action<BlockEntry> OnPlayerBlocked;
@@ -62,7 +64,7 @@ namespace AntiCheatMod
             return new List<BlockEntry>(_blockedPlayers.Values);
         }
 
-        public static void BlockPlayer(Photon.Realtime.Player player, string reason, BlockReason blockReason = BlockReason.AutoDetection, CSteamID steamID = default)
+        public static void BlockPlayer(Photon.Realtime.Player player, string reason, BlockReason blockReason = BlockReason.AutoDetection, CSteamID steamID = default, DetectionType? detectionType = null)
         {
             // Never block master client
             if (player.IsMasterClient)
@@ -78,16 +80,35 @@ namespace AntiCheatMod
                 return;
             }
 
-            // Prevent auto-blocking if recently unblocked, unless this is a manual block
-            if (blockReason == BlockReason.AutoDetection && _recentlyUnblocked.Contains(player.ActorNumber))
+            // Prevent auto-blocking if recently unblocked for the same detection type, unless this is a manual block
+            if (blockReason == BlockReason.AutoDetection && detectionType.HasValue && 
+                _recentlyUnblockedDetections.TryGetValue(player.ActorNumber, out var unblockedTypes) && 
+                unblockedTypes.Contains(detectionType.Value))
             {
-                AntiCheatPlugin.Logger.LogInfo($"[BLOCK PREVENTED] Player {player.NickName} was recently unblocked - not auto-blocking");
+                AntiCheatPlugin.Logger.LogInfo($"[BLOCK PREVENTED] Player {player.NickName} was recently unblocked for {detectionType.Value} - not auto-blocking");
+                return;
+            }
+            
+            // Prevent auto-blocking if player was manually unblocked (they have immunity to all detection types)
+            if (blockReason == BlockReason.AutoDetection && 
+                _recentlyUnblockedDetections.TryGetValue(player.ActorNumber, out var manualUnblockedTypes) && 
+                manualUnblockedTypes.Count == Enum.GetValues(typeof(DetectionType)).Length)
+            {
+                AntiCheatPlugin.Logger.LogInfo($"[BLOCK PREVENTED] Player {player.NickName} was manually unblocked - has immunity to all detection types");
                 return;
             }
 
+            // Track any item the player is currently holding
+            TrackPlayerHeldItem(player.ActorNumber);
+
             var blockEntry = new BlockEntry(player.ActorNumber, player.NickName, blockReason, reason, steamID);
             _blockedPlayers[player.ActorNumber] = blockEntry;
-            _recentlyUnblocked.Remove(player.ActorNumber); // Allow future auto-blocks after a new detection
+            
+            // Remove this detection type from recently unblocked list
+            if (detectionType.HasValue && _recentlyUnblockedDetections.TryGetValue(player.ActorNumber, out var types))
+            {
+                types.Remove(detectionType.Value);
+            }
             
             // Update player status
             PlayerManager.UpdatePlayerStatus(player.ActorNumber, PlayerStatus.Blocked);
@@ -95,13 +116,35 @@ namespace AntiCheatMod
             OnPlayerBlocked?.Invoke(blockEntry);
         }
 
-        public static void UnblockPlayer(int actorNumber)
+        public static void UnblockPlayer(int actorNumber, DetectionType? detectionType = null)
         {
-            if (_blockedPlayers.Remove(actorNumber))
+            if (_blockedPlayers.TryGetValue(actorNumber, out var blockEntry))
             {
+                _blockedPlayers.Remove(actorNumber);
+                
+                // Clean up any tracked items to prevent duplication
+                AntiCheatPlugin.CleanupBlockedPlayerItems(actorNumber);
+                
                 PlayerManager.UpdatePlayerStatus(actorNumber, PlayerStatus.Detected);
                 OnPlayerUnblocked?.Invoke(actorNumber);
-                _recentlyUnblocked.Add(actorNumber);
+                
+                // Handle immunity based on block reason
+                if (blockEntry.Reason == BlockReason.Manual)
+                {
+                    // Manual unblocks give NO immunity - human decision to unblock means they're immediately vulnerable
+                    AntiCheatPlugin.Logger.LogInfo($"[MANUAL UNBLOCK] Player {blockEntry.PlayerName} unblocked manually - no immunity given, immediately vulnerable to all detections");
+                }
+                else if (detectionType.HasValue)
+                {
+                    // Auto-detection unblocks give immunity only to the specific detection type
+                    if (!_recentlyUnblockedDetections.ContainsKey(actorNumber))
+                    {
+                        _recentlyUnblockedDetections[actorNumber] = new HashSet<DetectionType>();
+                    }
+                    _recentlyUnblockedDetections[actorNumber].Add(detectionType.Value);
+                    
+                    AntiCheatPlugin.Logger.LogInfo($"[AUTO UNBLOCK] Player {blockEntry.PlayerName} unblocked for {detectionType.Value} - giving immunity to this detection type only");
+                }
             }
         }
 
@@ -155,6 +198,28 @@ namespace AntiCheatMod
             _whitelistedSteamIDs.Clear();
             foreach (var id in ids)
                 _whitelistedSteamIDs.Add(id);
+        }
+
+        // Track item held by player when they're blocked
+        private static void TrackPlayerHeldItem(int actorNumber)
+        {
+            // Find the player's character and check if they're holding an item
+            var allCharacters = UnityEngine.Object.FindObjectsOfType<Character>();
+            foreach (var character in allCharacters)
+            {
+                var photonView = character.GetComponent<PhotonView>();
+                if (photonView != null && photonView.Owner != null && 
+                    photonView.Owner.ActorNumber == actorNumber)
+                {
+                    var characterData = character.GetComponent<CharacterData>();
+                    if (characterData != null && characterData.currentItem != null)
+                    {
+                        // Track the item they're holding
+                        AntiCheatPlugin.TrackBlockedPlayerItem(actorNumber, characterData.currentItem.gameObject);
+                        break;
+                    }
+                }
+            }
         }
     }
 } 
