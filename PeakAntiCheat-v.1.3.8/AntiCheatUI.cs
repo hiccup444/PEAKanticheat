@@ -12,7 +12,7 @@ namespace AntiCheatMod
     public class AntiCheatUI : MonoBehaviour, IInRoomCallbacks
     {
         private bool _uiVisible = false;
-        private const KeyCode TOGGLE_KEY = KeyCode.F1;
+        private static KeyCode _toggleKey = KeyCode.F2; // Default to F2
         private int _updateCounter = 0;
         private static Rect _windowRect = new Rect(200, 200, 900, 600);
         
@@ -47,6 +47,13 @@ namespace AntiCheatMod
                     type == DetectionType.SteamNameMismatch || type == DetectionType.NameImpersonation || type == DetectionType.MidGameNameChange)
                     continue;
                 _individualSliders[type] = DetectionManager.IsDetectionEnabled(type) ? 2 : 0;
+            }
+
+            // Set the keybind from config if available
+            if (AntiCheatPlugin.UIToggleKey != null)
+            {
+                _toggleKey = AntiCheatPlugin.UIToggleKey.Value.MainKey;
+                Debug.Log($"[AntiCheatUI] Keybind set to {_toggleKey} from config");
             }
 
             Debug.Log($"[AntiCheatUI] UI initialized. GameObject name: {gameObject.name}, Active: {gameObject.activeInHierarchy}, Enabled: {enabled}");
@@ -118,9 +125,9 @@ namespace AntiCheatMod
 
         private void Update()
         {
-            if (Input.GetKeyDown(TOGGLE_KEY))
+            if (Input.GetKeyDown(_toggleKey))
             {
-                Debug.Log($"[AntiCheatUI] F1 key pressed. IsMasterClient: {PhotonNetwork.IsMasterClient}, GameObject active: {gameObject.activeInHierarchy}");
+                Debug.Log($"[AntiCheatUI] {_toggleKey} key pressed. IsMasterClient: {PhotonNetwork.IsMasterClient}, GameObject active: {gameObject.activeInHierarchy}");
                 ToggleUI();
             }
         }
@@ -160,7 +167,7 @@ namespace AntiCheatMod
                 return;
 
             // Create the main window
-            _windowRect = GUI.Window(0, _windowRect, DrawWindow, "PEAK AntiCheat [F1]");
+            _windowRect = GUI.Window(0, _windowRect, DrawWindow, $"PEAK AntiCheat [{_toggleKey}]");
         }
 
         private void DrawWindow(int windowID)
@@ -395,6 +402,12 @@ namespace AntiCheatMod
                 RefreshPlayerList();
                 RefreshBlockedPlayersList();
             }
+        }
+
+        // Static method to set the keybind
+        public static void SetKeybind(KeyCode key)
+        {
+            _toggleKey = key;
         }
 
         private void OnDestroy()

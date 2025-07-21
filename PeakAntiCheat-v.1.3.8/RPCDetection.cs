@@ -279,8 +279,8 @@ namespace AntiCheatMod
                                             AntiCheatPlugin.Logger.LogError($"[CHARACTER DESTROY BLOCKED] They tried to destroy YOUR CHARACTER!");
                                         }
 
-                                        // Show visual log if enabled and we're master client
-                                        if (shouldShowVisual && PhotonNetwork.IsMasterClient && senderPlayer != null)
+                                        // Show visual log if enabled
+                                        if (shouldShowVisual && senderPlayer != null)
                                         {
                                             AntiCheatPlugin.LogVisually($"{{userColor}}{senderPlayer.NickName}</color> {{leftColor}}tried to destroy your character!</color>", false, false, true);
                                         }
@@ -416,11 +416,11 @@ namespace AntiCheatMod
                         AntiCheatPlugin.Logger.LogError($"[CHARACTER THEFT BLOCKED] {thief?.NickName ?? $"Actor {value}"} tried to steal your character!");
                     }
 
-                    // Show visual log if enabled and we're master client
-                    if (shouldShowVisual && PhotonNetwork.IsMasterClient && thief != null)
-                    {
-                        AntiCheatPlugin.LogVisually($"{{userColor}}{thief.NickName}</color> {{leftColor}}tried to steal your character!</color>", false, false, true);
-                    }
+                                                            // Show visual log if enabled
+                                        if (shouldShowVisual && thief != null)
+                                        {
+                                            AntiCheatPlugin.LogVisually($"{{userColor}}{thief.NickName}</color> {{leftColor}}tried to steal your character!</color>", false, false, true);
+                                        }
 
                     // Block player if auto-block is enabled
                     if (shouldBlock && PhotonNetwork.IsMasterClient && thief != null)
@@ -601,13 +601,10 @@ namespace AntiCheatMod
                 AntiCheatPlugin.Logger.LogWarning($"[LIGHT CAMPFIRE] Out of range players: {printout}");
             }
 
-            if (PhotonNetwork.IsMasterClient)
-            {
-                AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to light {__instance.advanceToSegment} campfire with players out of range!</color>", false, false, true);
+            AntiCheatPlugin.LogVisually($"{{userColor}}{info.Sender.NickName}</color> {{leftColor}}tried to light {__instance.advanceToSegment} campfire with players out of range!</color>", false, false, true);
 
-                // COMMENT OUT TO DISABLE PUNISHMENT
-                // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized campfire lighting - players out of range");
-            }
+            // COMMENT OUT TO DISABLE PUNISHMENT
+            // AntiCheatPlugin.BlockPlayer(info.Sender, $"Unauthorized campfire lighting - players out of range");
 
             return false; // Block the cheat attempt
         }

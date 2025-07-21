@@ -50,6 +50,7 @@ namespace AntiCheatMod
         public static ConfigEntry<bool> AutoBlockCheaters;
         public static ConfigEntry<bool> VerboseRPCLogging;
         private static ConfigEntry<string> WhitelistedSteamIDs;
+        public static ConfigEntry<KeyboardShortcut> UIToggleKey;
 
         // Connection log for visual messages
         private static PlayerConnectionLog _connectionLog;
@@ -86,6 +87,9 @@ namespace AntiCheatMod
 
         private static readonly HashSet<string> _recentDetections = new HashSet<string>();
         
+        // Track detected cheat mod users to prevent spam
+        private static readonly HashSet<int> _detectedCheatModUsers = new HashSet<int>();
+        
         // Track if startup message has been shown
         private static bool _startupMessageShown = false;
 
@@ -102,6 +106,7 @@ namespace AntiCheatMod
             VerboseRPCLogging = Config.Bind("Debug", "VerboseRPCLogging", false, "Log all RPC calls for debugging");
             WhitelistedSteamIDs = Config.Bind("General", "WhitelistedSteamIDs", "",
                 "Comma-separated list of Steam IDs that should never be RPC blocked (e.g. '76561198012345678,76561198087654321')");
+            UIToggleKey = Config.Bind("General", "UIToggleKey", new KeyboardShortcut(KeyCode.F2), "Key to toggle the anti-cheat UI (default: F2)");
 
             // Parse the whitelist
             ParseWhitelist();
@@ -281,13 +286,13 @@ namespace AntiCheatMod
             if (_connectionLog != null)
             {
                 Logger.LogInfo("[PEAKAntiCheat] Showing anticheat loaded message");
-                LogVisually($"{{joinedColor}}Anticheat loaded! Press F1 to open manager.</color>", false, true, false);
+                LogVisually($"{{joinedColor}}Anticheat loaded! Press F2 to open manager.</color>", false, true, false);
             }
             else
             {
                 Logger.LogWarning("[PEAKAntiCheat] PlayerConnectionLog not found after timeout, message will be queued");
                 // The message will be queued and shown when PlayerConnectionLog becomes available
-                LogVisually($"{{joinedColor}}Anticheat loaded! Press F1 to open manager.</color>", false, true, false);
+                LogVisually($"{{joinedColor}}Anticheat loaded! Press F2 to open manager.</color>", false, true, false);
             }
         }
 
@@ -456,6 +461,20 @@ namespace AntiCheatMod
         private void OnPlayerUnblocked(int actorNumber)
         {
             Logger.LogInfo($"[PLAYER UNBLOCKED] Actor #{actorNumber}");
+            
+            // Clear cheat mod detection tracking for this player
+            // This grants them immunity from cheat mod detection
+            _detectedCheatModUsers.Remove(actorNumber);
+            
+            // Also clear any recent detections for this player
+            var player = PhotonNetwork.CurrentRoom?.GetPlayer(actorNumber);
+            if (player != null)
+            {
+                string detectionKey = $"{player.NickName}_{actorNumber}_AtlasMod";
+                _recentDetections.Remove(detectionKey);
+                detectionKey = $"{player.NickName}_{actorNumber}_CherryMod";
+                _recentDetections.Remove(detectionKey);
+            }
         }
 
         // Main blocking method
@@ -611,8 +630,18 @@ namespace AntiCheatMod
             // The main performance gain comes from caching the FieldInfo objects and using delegates for methods
         }
 
-        public static bool LogVisually(string message, bool onlySendOnce = false, bool sfxJoin = false, bool sfxLeave = false)
+        public static bool LogVisually(string message, bool onlySendOnce = false, bool sfxJoin = false, bool sfxLeave = false, bool allowNonMaster = false)
         {
+            // Non-master clients should only see anticheat ping messages unless explicitly allowed
+            if (!PhotonNetwork.IsMasterClient && !allowNonMaster)
+            {
+                // Only allow anticheat ping messages for non-master clients
+                if (!message.Contains("has anticheat installed"))
+                {
+                    return true; // Silently ignore other messages for non-master clients
+                }
+            }
+
             if (!ShowVisualLogs.Value)
                 return true;
 
@@ -921,12 +950,25 @@ namespace AntiCheatMod
                 return;
             }
 
+            // Skip if we've already detected this player for cheat mods
+            if (_detectedCheatModUsers.Contains(player.ActorNumber))
+            {
+                return;
+            }
+
+            // Grant immunity to unblocked players from cheat mod detection
+            if (!IsBlocked(player.ActorNumber))
+            {
+                return;
+            }
+
             // Cheat mod property checks
             if (player.CustomProperties.ContainsKey("CherryUser"))
             {
                 Logger.LogWarning($"{player.NickName} is using the Cherry cheat mod!");
                 LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}is using the Cherry cheat mod!</color>", true, false, true);
                 DetectionManager.RecordDetection(DetectionType.CherryMod, player, "Cherry cheat mod user");
+                _detectedCheatModUsers.Add(player.ActorNumber);
                 return;
             }
 
@@ -935,6 +977,7 @@ namespace AntiCheatMod
                 Logger.LogWarning($"{player.NickName} is the Owner of the Cherry cheat mod!");
                 LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}is the Owner of the Cherry cheat mod!</color>", true, false, true);
                 DetectionManager.RecordDetection(DetectionType.CherryMod, player, "Cherry cheat mod owner");
+                _detectedCheatModUsers.Add(player.ActorNumber);
                 return;
             }
 
@@ -943,6 +986,7 @@ namespace AntiCheatMod
                 Logger.LogWarning($"{player.NickName} is using the Atlas cheat mod!");
                 LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}is using the Atlas cheat mod!</color>", true, false, true);
                 DetectionManager.RecordDetection(DetectionType.AtlasMod, player, "Atlas cheat mod user");
+                _detectedCheatModUsers.Add(player.ActorNumber);
                 return;
             }
 
@@ -951,6 +995,7 @@ namespace AntiCheatMod
                 Logger.LogWarning($"{player.NickName} is the Owner of the Atlas cheat mod!");
                 LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}is the Owner of the Atlas cheat mod!</color>", true, false, true);
                 DetectionManager.RecordDetection(DetectionType.AtlasMod, player, "Atlas cheat mod owner");
+                _detectedCheatModUsers.Add(player.ActorNumber);
                 return;
             }
 
@@ -1257,6 +1302,7 @@ namespace AntiCheatMod
             _playerLastKnownCoordinates.Clear();
             _playerCoordinateTimestamps.Clear();
             _blockedPlayerHeldItems.Clear();
+            _detectedCheatModUsers.Clear();
             
             // Reset startup message flag for next session
             _startupMessageShown = false;
@@ -1515,6 +1561,7 @@ namespace AntiCheatMod
             _playerLastKnownCoordinates.Remove(otherPlayer.ActorNumber);
             _playerCoordinateTimestamps.Remove(otherPlayer.ActorNumber);
             _blockedPlayerHeldItems.Remove(otherPlayer.ActorNumber);
+            _detectedCheatModUsers.Remove(otherPlayer.ActorNumber);
             PlayerManager.RemovePlayer(otherPlayer.ActorNumber);
         }
 
@@ -1815,7 +1862,7 @@ namespace AntiCheatMod
                     _anticheatUsers[sender.ActorNumber] = senderVersion;
                     
                     // Log visually for all clients (not just master)
-                    LogVisually($"{{joinedColor}}{sender.NickName}</color> {{leftColor}}has anticheat installed (v{senderVersion})</color>", false, true, false);
+                    LogVisually($"{{joinedColor}}{sender.NickName}</color> {{leftColor}}has anticheat installed (v{senderVersion})</color>", false, true, false, true);
                     
                     Logger.LogInfo($"[AntiCheat] Received ping from {sender.NickName} (v{senderVersion})");
                 }
