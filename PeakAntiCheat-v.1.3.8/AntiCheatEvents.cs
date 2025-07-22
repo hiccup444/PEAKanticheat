@@ -11,7 +11,8 @@ namespace AntiCheatMod
         WhitelistUpdate = 103,
         SyncRequest = 104,
         SyncResponse = 105,
-        CheatModDetected = 106
+        CheatModDetected = 106,
+        KickPlayer = 107
     }
 
     public static class AntiCheatEvents
@@ -22,6 +23,7 @@ namespace AntiCheatMod
         // New events for the UI system
         public static event Action<DetectionType, Photon.Realtime.Player, string> OnDetectionTriggered;
         public static event Action<Photon.Realtime.Player, bool> OnPlayerBlockStatusChanged;
+        public static event Action<Photon.Realtime.Player> OnPlayerKicked;
 
         public static void NotifyCheaterDetected(Photon.Realtime.Player player, string reason, CSteamID steamID)
         {
@@ -37,6 +39,11 @@ namespace AntiCheatMod
         public static void NotifyPlayerBlockStatusChanged(Photon.Realtime.Player player, bool isBlocked)
         {
             OnPlayerBlockStatusChanged?.Invoke(player, isBlocked);
+        }
+
+        public static void NotifyPlayerKicked(Photon.Realtime.Player player)
+        {
+            OnPlayerKicked?.Invoke(player);
         }
     }
 }

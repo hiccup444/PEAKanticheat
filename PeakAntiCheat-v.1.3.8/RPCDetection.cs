@@ -82,10 +82,19 @@ namespace AntiCheatMod
         {
             int sender = photonEvent.Sender;
 
-            // Block ALL events from blocked players silently
+            // Block events from blocked players, but allow specific "leaving" events
             if (sender > 0 && AntiCheatPlugin.IsBlocked(sender))
             {
-                return false; // Block silently without any logging
+                // Allow specific events that indicate the player is leaving or cleaning up
+                // These are typically Photon's internal events for player leaving
+                if (photonEvent.Code == 1 || // Player left room event
+                    photonEvent.Code == 2 || // Player properties changed (for leaving)
+                    photonEvent.Code == 3)   // Room properties changed (for leaving)
+                {
+                    return true; // Allow these events to pass through
+                }
+                
+                return false; // Block all other events silently without any logging
             }
 
 
@@ -446,83 +455,6 @@ namespace AntiCheatMod
             }
 
             return true; // Allow all legitimate ownership transfers
-        }
-
-        // Campfire log count manipulation
-        [HarmonyPatch(typeof(Campfire), "SetFireWoodCount")]
-        [HarmonyPrefix]
-        public static bool PreCampfireSetFireWoodCount(Campfire __instance, int count, PhotonMessageInfo info)
-        {
-            if (AntiCheatPlugin.VerboseRPCLogging.Value)
-                AntiCheatPlugin.Logger.LogInfo($"Campfire.SetFireWoodCount called by {info.Sender?.NickName} with count: {count}");
-
-            var photonView = __instance.GetComponent<PhotonView>();
-
-            // Always allow if sender is null (system) or master client
-            if (info.Sender == null || info.Sender.IsMasterClient)
-                return true;
-
-            // Allow if campfire is already spent
-            if (__instance.state == Campfire.FireState.Spent)
-                return true;
-
-            // Allow if they own the campfire
-            if (photonView != null && info.Sender.ActorNumber == photonView.Owner.ActorNumber)
-                return true;
-
-            // Check if the sender has or recently had a cookable item
-            var allCharacters = UnityEngine.Object.FindObjectsOfType<Character>();
-            foreach (var character in allCharacters)
-            {
-                var charPhotonView = character.GetComponent<PhotonView>();
-                if (charPhotonView != null && charPhotonView.Owner != null &&
-                    charPhotonView.Owner.ActorNumber == info.Sender.ActorNumber)
-                {
-                    // Check current item
-                    if (character.data.currentItem != null && character.data.currentItem.cooking.canBeCooked)
-                    {
-                        if (AntiCheatPlugin.VerboseRPCLogging.Value)
-                            AntiCheatPlugin.Logger.LogInfo($"[CAMPFIRE ALLOWED] {info.Sender.NickName} is holding a cookable item");
-                        return true;
-                    }
-                    break;
-                }
-            }
-
-            // Check if they had a cookable item in the last 2 seconds
-            if (AntiCheatPlugin.PlayerHadCookableItem(info.Sender.ActorNumber, 2f))
-            {
-                if (AntiCheatPlugin.VerboseRPCLogging.Value)
-                    AntiCheatPlugin.Logger.LogInfo($"[CAMPFIRE ALLOWED] {info.Sender.NickName} recently had a cookable item");
-                return true;
-            }
-
-            // Check detection settings
-            bool shouldBlock = DetectionManager.ShouldAutoBlock(DetectionType.UnauthorizedCampfireModification);
-            bool shouldShowVisual = DetectionManager.ShouldShowVisualWarning(DetectionType.UnauthorizedCampfireModification);
-            bool shouldLog = DetectionManager.ShouldLogToConsole(DetectionType.UnauthorizedCampfireModification);
-
-            // Log the unauthorized attempt
-            if (shouldLog)
-            {
-                AntiCheatPlugin.Logger.LogWarning($"[CAMPFIRE DETECTED] {info.Sender.NickName} (#{info.Sender.ActorNumber}) tried to set the log count to {count} for the {__instance.advanceToSegment} campfire without a cookable item!");
-            }
-
-            // Block player if auto-block is enabled
-            if (shouldBlock)
-            {
-                AntiCheatPlugin.BlockPlayer(info.Sender, "Campfire log manipulation - no cookable item", DetectionType.UnauthorizedCampfireModification);
-            }
-
-            // Record the detection
-            DetectionManager.RecordDetection(DetectionType.UnauthorizedCampfireModification, info.Sender, "Campfire log manipulation - no cookable item");
-
-            if (PhotonNetwork.IsMasterClient)
-            {
-                __instance.FireWoodCount = 3; // Reset to default only if we're master client
-            }
-
-            return false; // Block the RPC
         }
 
         // Campfire extinguishing

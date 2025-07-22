@@ -20,12 +20,12 @@ using System.Linq;
 
 namespace AntiCheatMod
 {
-    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.3.8")]
+    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.4.4")]
     public class AntiCheatPlugin : BaseUnityPlugin, IConnectionCallbacks, IMatchmakingCallbacks, IInRoomCallbacks, IOnEventCallback
     {
         public static new ManualLogSource Logger;
-        private static AntiCheatPlugin Instance;
-        private static new ConfigFile Config;
+        public static AntiCheatPlugin Instance { get; private set; }
+        public static new ConfigFile Config;
         
         // Player item tracking
         private static readonly Dictionary<int, (string itemName, DateTime timestamp, bool wasCookable)> _playerLastHeldItems = new Dictionary<int, (string, DateTime, bool)>();
@@ -39,7 +39,7 @@ namespace AntiCheatMod
         private static readonly Dictionary<int, GameObject> _blockedPlayerHeldItems = new Dictionary<int, GameObject>();
 
         // Plugin version
-        private const string PLUGIN_VERSION = "1.3.8";
+        private const string PLUGIN_VERSION = "1.4.4";
 
         // Custom event code for anticheat communication
         private const byte ANTICHEAT_PING_EVENT = 69;
@@ -92,6 +92,14 @@ namespace AntiCheatMod
         
         // Track if startup message has been shown
         private static bool _startupMessageShown = false;
+        
+        // Track players who haven't sent anticheat ping
+        private static readonly Dictionary<int, DateTime> _playersWithoutAnticheat = new Dictionary<int, DateTime>();
+        private const float ANTICHEAT_TIMEOUT_SECONDS = 10f; // Time to wait before auto-blocking (from ping send time)
+        
+        // Track master client changes for kick security
+        private static DateTime _lastMasterClientChange = DateTime.MinValue;
+        private const float MASTER_CLIENT_CHANGE_COOLDOWN_SECONDS = 30f; // Time to wait before allowing kicks after master client change
 
         private void Awake()
         {
@@ -135,6 +143,9 @@ namespace AntiCheatMod
 
             // Start tracking player coordinates for infinity rescue
             StartCoroutine(TrackPlayerCoordinates());
+
+            // Start checking for players without anticheat
+            StartCoroutine(CheckPlayersWithoutAnticheat());
 
             SceneManager.activeSceneChanged += OnSceneChanged;
         }
@@ -298,50 +309,69 @@ namespace AntiCheatMod
 
         private void InitializeDetectionManager()
         {
-            // Set up default detection settings based on config
-            DetectionManager.SetDetectionSettings(DetectionType.CherryMod, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.AtlasMod, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.SteamNameMismatch, 
-                new DetectionSettings(CheckSteamNames.Value, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.NameImpersonation, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.MidGameNameChange, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.SteamIDSpoofing, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.OwnershipTheft, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+            // Check if UI settings have been loaded (UI will set these to non-default values)
+            bool uiSettingsLoaded = false;
             
-            DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedDestroy, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.RateLimitExceeded, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedKill, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedRevive, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedWarp, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedStatusEffect, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedMovement, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-                        DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedEmote,
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedItemDrop, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedCampfireModification, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedFlareLighting, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedBananaSlip, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.MasterClientTheft, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
-            DetectionManager.SetDetectionSettings(DetectionType.InfinityWarp, 
-                new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+            // Check if any UI config entries have values (indicating UI has been used before)
+            var uiGroupSlidersConfig = Config.Bind("UI", "GroupSliders", "", "Saved group slider settings");
+            var uiIndividualSlidersConfig = Config.Bind("UI", "IndividualSliders", "", "Saved individual slider settings");
+            
+            if (!string.IsNullOrEmpty(uiGroupSlidersConfig.Value) || !string.IsNullOrEmpty(uiIndividualSlidersConfig.Value))
+            {
+                uiSettingsLoaded = true;
+                Logger.LogInfo("[PEAKAntiCheat] UI settings detected - skipping default detection initialization");
+            }
+            
+            // Only set default detection settings if UI settings haven't been loaded yet
+            if (!uiSettingsLoaded)
+            {
+                Logger.LogInfo("[PEAKAntiCheat] No UI settings found - initializing with default detection settings");
+                
+                // Set up default detection settings based on config
+                DetectionManager.SetDetectionSettings(DetectionType.CherryMod, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.AtlasMod, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.SteamNameMismatch, 
+                    new DetectionSettings(CheckSteamNames.Value, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.NameImpersonation, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.MidGameNameChange, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.SteamIDSpoofing, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.OwnershipTheft, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                
+                DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedDestroy, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.RateLimitExceeded, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedKill, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedRevive, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedWarp, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedStatusEffect, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedMovement, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedEmote,
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedItemDrop, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedCampfireModification, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedFlareLighting, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.UnauthorizedBananaSlip, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.MasterClientTheft, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+                DetectionManager.SetDetectionSettings(DetectionType.InfinityWarp, 
+                    new DetectionSettings(true, AutoBlockCheaters.Value, ShowVisualLogs.Value, true));
+            }
         }
 
         private void InitializeEventHandlers()
@@ -475,6 +505,10 @@ namespace AntiCheatMod
                 detectionKey = $"{player.NickName}_{actorNumber}_CherryMod";
                 _recentDetections.Remove(detectionKey);
             }
+            
+            // Grant immunity to prevent immediate re-detection
+            BlockingManager.GrantImmunity(actorNumber);
+            Logger.LogInfo($"[PLAYER UNBLOCKED] Granted immunity to Actor #{actorNumber} to prevent re-detection");
         }
 
         // Main blocking method
@@ -541,6 +575,38 @@ namespace AntiCheatMod
         public static bool IsBlocked(int actorNumber)
         {
             return BlockingManager.IsBlocked(actorNumber);
+        }
+
+        public static bool HasAnticheat(int actorNumber)
+        {
+            return _anticheatUsers.ContainsKey(actorNumber);
+        }
+
+        public static string GetAnticheatVersion(int actorNumber)
+        {
+            return _anticheatUsers.TryGetValue(actorNumber, out string version) ? version : null;
+        }
+
+        public static bool AutoKickBlockedPlayers { get; set; } = false;
+        public static bool AutoBlockNoAnticheat { get; set; } = false;
+
+        public static bool AreKicksAllowed()
+        {
+            if (_lastMasterClientChange == DateTime.MinValue)
+            {
+                // No master client change recorded, kicks are allowed
+                return true;
+            }
+
+            var timeSinceChange = (DateTime.Now - _lastMasterClientChange).TotalSeconds;
+            bool kicksAllowed = timeSinceChange >= MASTER_CLIENT_CHANGE_COOLDOWN_SECONDS;
+            
+            if (!kicksAllowed)
+            {
+                Logger.LogWarning($"[KICK SECURITY] Kicks disabled - master client changed {timeSinceChange:F1} seconds ago (cooldown: {MASTER_CLIENT_CHANGE_COOLDOWN_SECONDS}s)");
+            }
+            
+            return kicksAllowed;
         }
 
         // Item tracking methods
@@ -626,7 +692,6 @@ namespace AntiCheatMod
                 _addMessageDelegate = null;
             }
             
-            // Note: Field getter delegates are not needed since we can use FieldInfo.GetValue directly
             // The main performance gain comes from caching the FieldInfo objects and using delegates for methods
         }
 
@@ -956,11 +1021,15 @@ namespace AntiCheatMod
                 return;
             }
 
-            // Grant immunity to unblocked players from cheat mod detection
-            if (!IsBlocked(player.ActorNumber))
+            // Skip if player has immunity from mod detections
+            if (BlockingManager.HasImmunity(player.ActorNumber))
             {
+                Logger.LogInfo($"[CHEAT MOD CHECK] Skipping {player.NickName} - player has immunity");
                 return;
             }
+
+            // Check for cheat mods first
+            bool hasCheatMods = false;
 
             // Cheat mod property checks
             if (player.CustomProperties.ContainsKey("CherryUser"))
@@ -1136,6 +1205,10 @@ namespace AntiCheatMod
         public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
         {
             Logger.LogInfo($"{newMasterClient.NickName} (#{newMasterClient.ActorNumber}) is the new master client!");
+
+            // Record the master client change for kick security
+            _lastMasterClientChange = DateTime.Now;
+            Logger.LogInfo($"[MASTER CLIENT] Master client change recorded - kicks disabled for {MASTER_CLIENT_CHANGE_COOLDOWN_SECONDS} seconds");
 
             // Update player status in PlayerManager
             PlayerManager.HandleMasterClientSwitch(newMasterClient);
@@ -1343,11 +1416,14 @@ namespace AntiCheatMod
         {
             yield return new WaitForSeconds(2f);
             CheckPlayerForCheatMods(player);
+            
+            // Start secondary check after 5 seconds
+            StartCoroutine(SecondaryCheatModCheck(player));
         }
 
         private IEnumerator SendAntiCheatPingToNewPlayer(Photon.Realtime.Player newPlayer)
         {
-            yield return new WaitForSeconds(2f);
+            yield return new WaitForSeconds(1f);
 
             if (!PhotonNetwork.IsConnected || !PhotonNetwork.InRoom || PhotonNetwork.LocalPlayer == null)
                 yield break;
@@ -1369,11 +1445,18 @@ namespace AntiCheatMod
 
             PhotonNetwork.RaiseEvent(ANTICHEAT_PING_EVENT, pingData, opts, SendOptions.SendReliable);
             Logger.LogInfo($"[AntiCheat] Sent anticheat ping to new player {newPlayer.NickName}");
+            
+            // Start tracking this player for anticheat timeout (10 seconds from now)
+            if (AutoBlockNoAnticheat && !_anticheatUsers.ContainsKey(newPlayer.ActorNumber))
+            {
+                _playersWithoutAnticheat[newPlayer.ActorNumber] = DateTime.Now;
+                Logger.LogInfo($"[AntiCheat] Started tracking {newPlayer.NickName} for anticheat timeout (10s from ping)");
+            }
         }
 
         private IEnumerator SendAntiCheatPingToAllExistingPlayers()
         {
-            yield return new WaitForSeconds(2f);
+            yield return new WaitForSeconds(1f);
 
             if (!PhotonNetwork.IsConnected || !PhotonNetwork.InRoom || PhotonNetwork.LocalPlayer == null)
                 yield break;
@@ -1403,6 +1486,19 @@ namespace AntiCheatMod
 
                 PhotonNetwork.RaiseEvent(ANTICHEAT_PING_EVENT, pingData, opts, SendOptions.SendReliable);
                 Logger.LogInfo($"[AntiCheat] Sent anticheat ping to existing player {player.NickName}");
+            }
+        }
+
+        private IEnumerator SecondaryCheatModCheck(Photon.Realtime.Player player)
+        {
+            yield return new WaitForSeconds(5f);
+            
+            // Send secondary check event to the player
+            if (PhotonNetwork.IsMasterClient && player.ActorNumber != PhotonNetwork.LocalPlayer.ActorNumber)
+            {
+                var eventData = new object[] { player.ActorNumber };
+                PhotonNetwork.RaiseEvent(70, eventData, new RaiseEventOptions { TargetActors = new int[] { player.ActorNumber } }, SendOptions.SendReliable);
+                Logger.LogInfo($"[SECONDARY CHECK] Sent secondary cheat mod check to {player.NickName}");
             }
         }
 
@@ -1555,7 +1651,19 @@ namespace AntiCheatMod
 
         public void OnPlayerLeftRoom(Photon.Realtime.Player otherPlayer)
         {
+            Logger.LogInfo($"[AntiCheat] Player left: {otherPlayer.NickName} (Actor #{otherPlayer.ActorNumber})");
+            
+            // Remove from block list if they were blocked
+            if (BlockingManager.IsBlocked(otherPlayer.ActorNumber))
+            {
+                Logger.LogInfo($"[AntiCheat] Removing blocked player {otherPlayer.NickName} from block list (they left the room)");
+                BlockingManager.RemovePlayer(otherPlayer.ActorNumber);
+            }
+            
             _knownPlayerIdentities.RemoveAll(p => p.ActorNumber == otherPlayer.ActorNumber);
+            _anticheatUsers.Remove(otherPlayer.ActorNumber);
+            _playersWithoutAnticheat.Remove(otherPlayer.ActorNumber);
+            BlockingManager.RemoveImmunity(otherPlayer.ActorNumber);
             _playerLastHeldItems.Remove(otherPlayer.ActorNumber);
             _recentlySpawnedPlayers.Remove(otherPlayer.ActorNumber);
             _playerLastKnownCoordinates.Remove(otherPlayer.ActorNumber);
@@ -1618,6 +1726,9 @@ namespace AntiCheatMod
             {
                 PlayerManager.AddPlayer(player);
             }
+
+            // Generate invite link for master client
+            InviteLinkGenerator.OnJoinedRoom();
 
             // --- CHEAT MOD DETECTION ---
             try
@@ -1759,8 +1870,17 @@ namespace AntiCheatMod
 
         private void SendBananaSlipRpcToMaster()
         {
-            // Start coroutine to wait for characters to spawn
-            StartCoroutine(SendUnauthorizedBananaSlipToMaster());
+            // Start coroutine to wait for characters to spawn, with additional delay to avoid spam
+            StartCoroutine(SendUnauthorizedBananaSlipToMasterDelayed());
+        }
+
+        private IEnumerator SendUnauthorizedBananaSlipToMasterDelayed()
+        {
+            // Wait 5 seconds to avoid conflicting with primary cheat mod detection
+            yield return new WaitForSeconds(5f);
+            
+            // Then proceed with the original method
+            yield return StartCoroutine(SendUnauthorizedBananaSlipToMaster());
         }
 
         private IEnumerator SendAntiCheatPingDelayed()
@@ -1805,6 +1925,86 @@ namespace AntiCheatMod
             }
         }
 
+        private IEnumerator CheckPlayersWithoutAnticheat()
+        {
+            while (true)
+            {
+                yield return new WaitForSeconds(2f);
+
+                if (PhotonNetwork.InRoom && PhotonNetwork.IsMasterClient && AutoBlockNoAnticheat)
+                {
+                    var currentTime = DateTime.Now;
+                    var playersToBlock = new List<int>();
+
+                    // Check all players except master client and local player
+                    foreach (var player in PhotonNetwork.PlayerList)
+                    {
+                        if (player.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber || player.IsMasterClient)
+                            continue;
+
+                        // If player doesn't have anticheat and we haven't started tracking them yet
+                        // Note: Tracking now starts when we send the ping, not when they join
+                        if (!_anticheatUsers.ContainsKey(player.ActorNumber) && !_playersWithoutAnticheat.ContainsKey(player.ActorNumber))
+                        {
+                            // Check if player is whitelisted
+                            var steamID = GetPlayerSteamID(player);
+                            if (steamID != CSteamID.Nil && BlockingManager.IsWhitelisted(steamID.m_SteamID))
+                            {
+                                Logger.LogInfo($"[AntiCheat] Player {player.NickName} is whitelisted - not tracking for anticheat timeout");
+                                BlockingManager.GrantImmunity(player.ActorNumber);
+                                continue;
+                            }
+                            
+                            // Don't track if already blocked
+                            if (BlockingManager.IsBlocked(player.ActorNumber))
+                            {
+                                Logger.LogInfo($"[AntiCheat] Player {player.NickName} is already blocked - not tracking for anticheat timeout");
+                                continue;
+                            }
+                            
+                            // Don't automatically track new players - tracking starts when we send the ping
+                            // _playersWithoutAnticheat[player.ActorNumber] = currentTime;
+                            // Logger.LogInfo($"[AntiCheat] Started tracking {player.NickName} for anticheat timeout");
+                        }
+                        // If player doesn't have anticheat and timeout has expired (and not already blocked)
+                        else if (!_anticheatUsers.ContainsKey(player.ActorNumber) && 
+                                 _playersWithoutAnticheat.TryGetValue(player.ActorNumber, out var startTime) &&
+                                 (currentTime - startTime).TotalSeconds >= ANTICHEAT_TIMEOUT_SECONDS &&
+                                 !BlockingManager.IsBlocked(player.ActorNumber))
+                        {
+                            playersToBlock.Add(player.ActorNumber);
+                        }
+                        // If player is already blocked, stop tracking them
+                        else if (BlockingManager.IsBlocked(player.ActorNumber) && _playersWithoutAnticheat.ContainsKey(player.ActorNumber))
+                        {
+                            Logger.LogInfo($"[AntiCheat] Player {player.NickName} is already blocked - removing from anticheat timeout tracking");
+                            _playersWithoutAnticheat.Remove(player.ActorNumber);
+                        }
+                    }
+
+                    // Auto-block players without anticheat (but not immune)
+                    foreach (var actorNumber in playersToBlock)
+                    {
+                        var player = PhotonNetwork.CurrentRoom?.GetPlayer(actorNumber);
+                        if (player != null)
+                        {
+                            if (!BlockingManager.HasImmunity(actorNumber))
+                            {
+                                Logger.LogWarning($"[AUTO BLOCK] Player {player.NickName} has no anticheat - auto-blocking");
+                                LogVisually($"{{userColor}}{player.NickName}</color> {{leftColor}}has no anticheat - auto-blocked</color>", false, false, true);
+                                BlockPlayer(player, "No anticheat installed", DetectionType.SteamIDSpoofing);
+                            }
+                            else
+                            {
+                                Logger.LogInfo($"[AUTO BLOCK] Skipping auto-block for immune player {player.NickName} (Actor #{actorNumber})");
+                            }
+                            _playersWithoutAnticheat.Remove(actorNumber);
+                        }
+                    }
+                }
+            }
+        }
+
         public void OnEvent(EventData photonEvent)
         {
 
@@ -1812,6 +2012,13 @@ namespace AntiCheatMod
             if (photonEvent.Code == ANTICHEAT_PING_EVENT)
             {
                 HandleAntiCheatPing(photonEvent);
+                return;
+            }
+
+            // Handle secondary cheat mod check response
+            if (photonEvent.Code == 70)
+            {
+                HandleSecondaryCheatModCheckResponse(photonEvent);
                 return;
             }
 
@@ -1842,6 +2049,9 @@ namespace AntiCheatMod
                     if (PhotonNetwork.IsMasterClient)
                         HandleCheatModDetected(photonEvent);
                     break;
+                case AntiCheatNetEvent.KickPlayer:
+                    HandleKickPlayer(photonEvent);
+                    break;
             }
         }
 
@@ -1849,6 +2059,8 @@ namespace AntiCheatMod
         private void HandleAntiCheatPing(EventData photonEvent)
         {
             Logger.LogInfo($"[AntiCheat] HandleAntiCheatPing called - Event from actor {photonEvent.Sender}");
+            
+            // FALLBACK: Always allow anticheat ping events through, even if sender is blocked
             if (photonEvent.CustomData is object[] pingData && pingData.Length >= 3)
             {
                 string senderName = (string)pingData[0];
@@ -1858,19 +2070,57 @@ namespace AntiCheatMod
                 var sender = PhotonNetwork.CurrentRoom?.GetPlayer(photonEvent.Sender);
                 if (sender != null)
                 {
+                    bool wasBlocked = BlockingManager.IsBlocked(sender.ActorNumber);
+                    
                     // Store that this player has anticheat
                     _anticheatUsers[sender.ActorNumber] = senderVersion;
+                    
+                    // Remove from players without anticheat list
+                    _playersWithoutAnticheat.Remove(sender.ActorNumber);
+                    
+                    // FALLBACK: Check if player was incorrectly blocked for no anticheat
+                    if (wasBlocked)
+                    {
+                        var blockEntry = BlockingManager.GetBlockEntry(sender.ActorNumber);
+                        if (blockEntry != null && blockEntry.SpecificReason.Contains("No anticheat installed"))
+                        {
+                            Logger.LogWarning($"[AntiCheat] FALLBACK: Player {sender.NickName} was incorrectly blocked for no anticheat - unblocking");
+                            LogVisually($"{{joinedColor}}{sender.NickName}</color> {{leftColor}}has anticheat - unblocking from incorrect block</color>", false, true, false, true);
+                            BlockingManager.UnblockPlayer(sender.ActorNumber, DetectionType.SteamIDSpoofing);
+                        }
+                        else
+                        {
+                            Logger.LogInfo($"[AntiCheat] FALLBACK: Player {sender.NickName} is blocked but not for no anticheat - keeping blocked");
+                        }
+                    }
                     
                     // Log visually for all clients (not just master)
                     LogVisually($"{{joinedColor}}{sender.NickName}</color> {{leftColor}}has anticheat installed (v{senderVersion})</color>", false, true, false, true);
                     
-                    Logger.LogInfo($"[AntiCheat] Received ping from {sender.NickName} (v{senderVersion})");
+                    Logger.LogInfo($"[AntiCheat] Received ping from {sender.NickName} (v{senderVersion}) - was blocked: {wasBlocked}");
                 }
             }
             else
             {
                 Logger.LogWarning($"[AntiCheat] Invalid ping data received from actor {photonEvent.Sender}");
             }
+        }
+
+        private void HandleSecondaryCheatModCheckResponse(EventData photonEvent)
+        {
+            if (!PhotonNetwork.IsMasterClient)
+                return;
+
+            var sender = PhotonNetwork.CurrentRoom?.GetPlayer(photonEvent.Sender);
+            if (sender == null)
+                return;
+
+            Logger.LogWarning($"[SECONDARY CHECK] {sender.NickName} responded to secondary check - detected as cheat mod user!");
+            LogVisually($"{{userColor}}{sender.NickName}</color> {{leftColor}}is using a cheat mod (secondary detection)!</color>", true, false, true);
+            
+            // Detect as Atlas mod user (since they responded to the check)
+            DetectionManager.RecordDetection(DetectionType.AtlasMod, sender, "Cheat mod user (secondary detection)");
+            _detectedCheatModUsers.Add(sender.ActorNumber);
         }
 
         // --- MASTER: Handle sync request ---
@@ -2010,10 +2260,90 @@ namespace AntiCheatMod
             BlockingManager.SetWhitelist(whitelist);
         }
 
-        // --- UI: Only master can call these, and must broadcast ---
-        // When master blocks/unblocks, toggles detection, or changes whitelist, call the above Broadcast* methods
+        // --- MASTER: Send kick event to target player ---
+        public static void KickPlayer(int actorNumber)
+        {
+            if (!PhotonNetwork.IsMasterClient)
+            {
+                Logger.LogWarning("[KICK] Only master client can kick players");
+                return;
+            }
 
-        // ... rest of your plugin ...
+            // Check if kicks are allowed (security against recent master client changes)
+            if (!AreKicksAllowed())
+            {
+                Logger.LogWarning("[KICK] Kicks disabled due to recent master client change");
+                return;
+            }
+
+            var targetPlayer = PhotonNetwork.CurrentRoom?.GetPlayer(actorNumber);
+            if (targetPlayer == null)
+            {
+                Logger.LogWarning($"[KICK] Player with actor number {actorNumber} not found");
+                return;
+            }
+
+            // Never kick the master client
+            if (targetPlayer.IsMasterClient)
+            {
+                Logger.LogWarning($"[KICK] Cannot kick master client {targetPlayer.NickName}");
+                return;
+            }
+
+            Logger.LogInfo($"[KICK] Master client kicking {targetPlayer.NickName} (Actor #{actorNumber})");
+            
+            // Remove from block list since they're being kicked
+            if (BlockingManager.IsBlocked(actorNumber))
+            {
+                Logger.LogInfo($"[KICK] Removing kicked player {targetPlayer.NickName} from block list");
+                BlockingManager.RemovePlayer(actorNumber);
+            }
+            
+            // Send kick event to the target player
+            object[] kickData = { actorNumber };
+            RaiseEventOptions opts = new RaiseEventOptions
+            {
+                TargetActors = new int[] { actorNumber }
+            };
+            
+            PhotonNetwork.RaiseEvent((byte)AntiCheatNetEvent.KickPlayer, kickData, opts, SendOptions.SendReliable);
+            
+            // Notify the kick event
+            AntiCheatEvents.NotifyPlayerKicked(targetPlayer);
+        }
+
+        // --- CLIENT: Handle kick event ---
+        private void HandleKickPlayer(EventData photonEvent)
+        {
+            // SECURITY: Only accept kick events from master client
+            if (photonEvent.Sender != PhotonNetwork.MasterClient.ActorNumber)
+            {
+                Logger.LogWarning($"[SECURITY] Blocked fake kick event from non-master client (Actor #{photonEvent.Sender})");
+                return;
+            }
+
+            if (photonEvent.CustomData is object[] data && data.Length >= 1)
+            {
+                int targetActorNumber = (int)data[0];
+                
+                // Only process if this kick is meant for us
+                if (targetActorNumber == PhotonNetwork.LocalPlayer.ActorNumber)
+                {
+                    Logger.LogWarning("[KICK] Received kick command from master client - leaving room");
+                    LogVisually($"{{leftColor}}You have been kicked by the master client</color>", false, false, true, true);
+                    
+                    // Remove from block list if we were blocked
+                    if (BlockingManager.IsBlocked(targetActorNumber))
+                    {
+                        Logger.LogInfo($"[KICK] Removing kicked player from block list");
+                        BlockingManager.RemovePlayer(targetActorNumber);
+                    }
+                    
+                    // Leave the room
+                    PhotonNetwork.LeaveRoom();
+                }
+            }
+        }
     }
 
     public class PlayerIdentity

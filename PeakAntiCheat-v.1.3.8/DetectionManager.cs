@@ -194,14 +194,22 @@ namespace AntiCheatMod
         public static void RecordDetection(DetectionType type, Photon.Realtime.Player target, string reason, CSteamID steamID = default)
         {
             var result = new DetectionResult(type, target, reason, steamID);
+            
+            // Always trigger visual notification for master client
+            OnDetectionOccurred?.Invoke(result);
+            
+            // Skip recording detection if player is already blocked to prevent spam
+            if (BlockingManager.IsBlocked(target.ActorNumber))
+            {
+                return;
+            }
+            
             _detectionHistory.Add(result);
             
             if (!_playerDetectionHistory.ContainsKey(target.ActorNumber))
                 _playerDetectionHistory[target.ActorNumber] = new List<DetectionResult>();
             
             _playerDetectionHistory[target.ActorNumber].Add(result);
-            
-            OnDetectionOccurred?.Invoke(result);
         }
 
         public static List<DetectionResult> GetDetectionHistory()

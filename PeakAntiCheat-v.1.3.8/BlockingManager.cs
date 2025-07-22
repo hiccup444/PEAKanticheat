@@ -43,6 +43,9 @@ namespace AntiCheatMod
         // Track recently unblocked players by detection type to prevent immediate re-blocking for the same reason
         private static readonly Dictionary<int, HashSet<DetectionType>> _recentlyUnblockedDetections = new Dictionary<int, HashSet<DetectionType>>();
         
+        // Track players with immunity from auto-kick and auto-block no anticheat
+        private static readonly HashSet<int> _playersWithImmunity = new HashSet<int>();
+        
         // Events for UI updates
         public static event Action<BlockEntry> OnPlayerBlocked;
         public static event Action<int> OnPlayerUnblocked;
@@ -73,10 +76,19 @@ namespace AntiCheatMod
                 return;
             }
 
+            // Check if player is already blocked
+            if (IsBlocked(player.ActorNumber))
+            {
+                AntiCheatPlugin.Logger.LogInfo($"[BLOCK PREVENTED] Player {player.NickName} is already blocked - skipping duplicate block");
+                return;
+            }
+
             // Check whitelist
             if (steamID != CSteamID.Nil && _whitelistedSteamIDs.Contains(steamID.m_SteamID))
             {
                 AntiCheatPlugin.Logger.LogInfo($"[WHITELIST] Player {player.NickName} is whitelisted - not blocking");
+                // Grant immunity to whitelisted players
+                GrantImmunity(player.ActorNumber);
                 return;
             }
 
@@ -114,6 +126,25 @@ namespace AntiCheatMod
             PlayerManager.UpdatePlayerStatus(player.ActorNumber, PlayerStatus.Blocked);
             
             OnPlayerBlocked?.Invoke(blockEntry);
+            
+            // Auto-kick if enabled and player has anticheat (but not immune)
+            if (AntiCheatPlugin.AutoKickBlockedPlayers && AntiCheatPlugin.HasAnticheat(player.ActorNumber) && !HasImmunity(player.ActorNumber))
+            {
+                // Check if kicks are allowed (security against recent master client changes)
+                if (AntiCheatPlugin.AreKicksAllowed())
+                {
+                    AntiCheatPlugin.Logger.LogInfo($"[AUTO KICK] Auto-kicking blocked player {player.NickName} (Actor #{player.ActorNumber})");
+                    AntiCheatPlugin.KickPlayer(player.ActorNumber);
+                }
+                else
+                {
+                    AntiCheatPlugin.Logger.LogWarning($"[AUTO KICK] Skipping auto-kick for {player.NickName} - kicks disabled due to recent master client change");
+                }
+            }
+            else if (AntiCheatPlugin.AutoKickBlockedPlayers && AntiCheatPlugin.HasAnticheat(player.ActorNumber) && HasImmunity(player.ActorNumber))
+            {
+                AntiCheatPlugin.Logger.LogInfo($"[AUTO KICK] Skipping auto-kick for immune player {player.NickName} (Actor #{player.ActorNumber})");
+            }
         }
 
         public static void UnblockPlayer(int actorNumber, DetectionType? detectionType = null)
@@ -131,19 +162,23 @@ namespace AntiCheatMod
                 // Handle immunity based on block reason
                 if (blockEntry.Reason == BlockReason.Manual)
                 {
-                    // Manual unblocks give NO immunity - human decision to unblock means they're immediately vulnerable
-                    AntiCheatPlugin.Logger.LogInfo($"[MANUAL UNBLOCK] Player {blockEntry.PlayerName} unblocked manually - no immunity given, immediately vulnerable to all detections");
+                    // Manual unblocks grant immunity from auto-kick, auto-block no anticheat, and mod detections
+                    GrantImmunity(actorNumber);
+                    AntiCheatPlugin.Logger.LogInfo($"[MANUAL UNBLOCK] Player {blockEntry.PlayerName} unblocked manually - granted immunity from auto-kick, auto-block no anticheat, and mod detections");
                 }
                 else if (detectionType.HasValue)
                 {
-                    // Auto-detection unblocks give immunity only to the specific detection type
+                    // Auto-detection unblocks give immunity to the specific detection type and mod detections
                     if (!_recentlyUnblockedDetections.ContainsKey(actorNumber))
                     {
                         _recentlyUnblockedDetections[actorNumber] = new HashSet<DetectionType>();
                     }
                     _recentlyUnblockedDetections[actorNumber].Add(detectionType.Value);
                     
-                    AntiCheatPlugin.Logger.LogInfo($"[AUTO UNBLOCK] Player {blockEntry.PlayerName} unblocked for {detectionType.Value} - giving immunity to this detection type only");
+                    // Also grant immunity from mod detections to prevent immediate re-blocking
+                    GrantImmunity(actorNumber);
+                    
+                    AntiCheatPlugin.Logger.LogInfo($"[AUTO UNBLOCK] Player {blockEntry.PlayerName} unblocked for {detectionType.Value} - giving immunity to this detection type and mod detections");
                 }
             }
         }
@@ -168,6 +203,23 @@ namespace AntiCheatMod
         public static List<ulong> GetWhitelistedSteamIDs()
         {
             return new List<ulong>(_whitelistedSteamIDs);
+        }
+
+        public static bool HasImmunity(int actorNumber)
+        {
+            return _playersWithImmunity.Contains(actorNumber);
+        }
+
+        public static void GrantImmunity(int actorNumber)
+        {
+            _playersWithImmunity.Add(actorNumber);
+            AntiCheatPlugin.Logger.LogInfo($"[IMMUNITY] Granted immunity to player Actor #{actorNumber}");
+        }
+
+        public static void RemoveImmunity(int actorNumber)
+        {
+            _playersWithImmunity.Remove(actorNumber);
+            AntiCheatPlugin.Logger.LogInfo($"[IMMUNITY] Removed immunity from player Actor #{actorNumber}");
         }
 
         public static void ClearAllBlocks()
