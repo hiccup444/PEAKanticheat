@@ -20,7 +20,7 @@ using System.Linq;
 
 namespace AntiCheatMod
 {
-    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.4.5")]
+    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.4.6")]
     public class AntiCheatPlugin : BaseUnityPlugin, IConnectionCallbacks, IMatchmakingCallbacks, IInRoomCallbacks, IOnEventCallback
     {
         public static new ManualLogSource Logger;
@@ -39,7 +39,7 @@ namespace AntiCheatMod
         private static readonly Dictionary<int, GameObject> _blockedPlayerHeldItems = new Dictionary<int, GameObject>();
 
         // Plugin version
-        private const string PLUGIN_VERSION = "1.4.5";
+        private const string PLUGIN_VERSION = "1.4.6";
 
         // Custom event code for anticheat communication
         private const byte ANTICHEAT_PING_EVENT = 69;
@@ -85,6 +85,12 @@ namespace AntiCheatMod
         // Track anticheat users
         private static readonly Dictionary<int, string> _anticheatUsers = new Dictionary<int, string>();
 
+        // Track player mod lists
+        private static readonly Dictionary<int, string[]> _playerModLists = new Dictionary<int, string[]>();
+        
+        // Track players who have opted out of mod sharing
+        private static readonly HashSet<int> _playersOptedOutOfModSharing = new HashSet<int>();
+
         private static readonly HashSet<string> _recentDetections = new HashSet<string>();
         
         // Track detected cheat mod users to prevent spam
@@ -115,6 +121,7 @@ namespace AntiCheatMod
             WhitelistedSteamIDs = Config.Bind("General", "WhitelistedSteamIDs", "",
                 "Comma-separated list of Steam IDs that should never be RPC blocked (e.g. '76561198012345678,76561198087654321')");
             UIToggleKey = Config.Bind("General", "UIToggleKey", new KeyboardShortcut(KeyCode.F2), "Key to toggle the anti-cheat UI (default: F2)");
+            ShareModList = Config.Bind("General", "ShareModList", true, "Share your mod list with the host (enabled by default)");
 
             // Parse the whitelist
             ParseWhitelist();
@@ -589,6 +596,7 @@ namespace AntiCheatMod
 
         public static bool AutoKickBlockedPlayers { get; set; } = false;
         public static bool AutoBlockNoAnticheat { get; set; } = false;
+        public static ConfigEntry<bool> ShareModList;
 
         public static bool AreKicksAllowed()
         {
@@ -1805,6 +1813,15 @@ namespace AntiCheatMod
             {
                 PhotonNetwork.RaiseEvent((byte)AntiCheatNetEvent.SyncRequest, null,
                     new RaiseEventOptions { Receivers = ReceiverGroup.MasterClient }, SendOptions.SendReliable);
+                
+                // Send mod list to master client
+                SendModListToMaster();
+                
+                // Start tracking for mod list timeout (if opted out)
+                if (!ShareModList.Value)
+                {
+                    StartCoroutine(TrackModListOptOut());
+                }
             }
             else
             {
@@ -2019,6 +2036,13 @@ namespace AntiCheatMod
             if (photonEvent.Code == 70)
             {
                 HandleSecondaryCheatModCheckResponse(photonEvent);
+                return;
+            }
+
+            // Handle mod list from clients
+            if (photonEvent.Code == 71)
+            {
+                HandleModListFromClient(photonEvent);
                 return;
             }
 
@@ -2310,6 +2334,131 @@ namespace AntiCheatMod
             
             // Notify the kick event
             AntiCheatEvents.NotifyPlayerKicked(targetPlayer);
+        }
+
+        public static string[] GetInstalledMods()
+        {
+            try
+            {
+                var mods = new List<string>();
+                foreach (var plugin in BepInEx.Bootstrap.Chainloader.PluginInfos.Values)
+                {
+                    mods.Add($"{plugin.Metadata.Name} v{plugin.Metadata.Version}");
+                }
+                return mods.ToArray();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"[PEAKAntiCheat] Error getting installed mods: {ex.Message}");
+                return new string[0];
+            }
+        }
+
+        public static void SendModListToMaster()
+        {
+            if (PhotonNetwork.IsMasterClient)
+            {
+                // Master client doesn't need to send to itself
+                return;
+            }
+
+            // Check if player has opted out of sharing mod list
+            if (!ShareModList.Value)
+            {
+                Logger.LogInfo($"[PEAKAntiCheat] Mod list sharing disabled by config - not sending mod list");
+                return;
+            }
+
+            try
+            {
+                string[] mods = GetInstalledMods();
+                string modListString = string.Join("|", mods);
+
+                var eventData = new ExitGames.Client.Photon.Hashtable
+                {
+                    { "modList", modListString },
+                    { "senderActorNumber", PhotonNetwork.LocalPlayer.ActorNumber }
+                };
+
+                PhotonNetwork.RaiseEvent(71, eventData, new RaiseEventOptions
+                {
+                    Receivers = ReceiverGroup.MasterClient,
+                    CachingOption = EventCaching.DoNotCache
+                }, SendOptions.SendReliable);
+
+                Logger.LogInfo($"[PEAKAntiCheat] Sent mod list to master client ({mods.Length} mods)");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"[PEAKAntiCheat] Error sending mod list: {ex.Message}");
+            }
+        }
+
+        public static string[] GetPlayerModList(int actorNumber)
+        {
+            if (_playerModLists.TryGetValue(actorNumber, out string[] mods))
+            {
+                return mods;
+            }
+            return new string[0];
+        }
+
+        public static bool HasPlayerOptedOutOfModSharing(int actorNumber)
+        {
+            return _playersOptedOutOfModSharing.Contains(actorNumber);
+        }
+
+        private System.Collections.IEnumerator TrackModListOptOut()
+        {
+            // Wait a bit for other players to send their mod lists
+            yield return new WaitForSeconds(3f);
+            
+            // Check all players who haven't sent mod lists
+            foreach (var player in PhotonNetwork.CurrentRoom.Players.Values)
+            {
+                if (player.ActorNumber != PhotonNetwork.LocalPlayer.ActorNumber && 
+                    !_playerModLists.ContainsKey(player.ActorNumber))
+                {
+                    _playersOptedOutOfModSharing.Add(player.ActorNumber);
+                    Logger.LogInfo($"[PEAKAntiCheat] Player {player.NickName} has opted out of mod sharing");
+                }
+            }
+        }
+
+        private void HandleModListFromClient(EventData photonEvent)
+        {
+            if (!PhotonNetwork.IsMasterClient)
+            {
+                return;
+            }
+
+            try
+            {
+                if (photonEvent.CustomData is ExitGames.Client.Photon.Hashtable data)
+                {
+                    if (data.ContainsKey("modList") && data.ContainsKey("senderActorNumber"))
+                    {
+                        string modListString = (string)data["modList"];
+                        int senderActorNumber = (int)data["senderActorNumber"];
+
+                        string[] mods = modListString.Split('|');
+                        _playerModLists[senderActorNumber] = mods;
+                        
+                        // Remove from opted out list since they sent their mod list
+                        _playersOptedOutOfModSharing.Remove(senderActorNumber);
+
+                        var sender = PhotonNetwork.CurrentRoom?.GetPlayer(senderActorNumber);
+                        if (sender != null)
+                        {
+                            Logger.LogInfo($"[PEAKAntiCheat] Received mod list from {sender.NickName} ({mods.Length} mods)");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"[PEAKAntiCheat] Error handling mod list from client: {ex.Message}");
+            }
         }
 
         // --- CLIENT: Handle kick event ---

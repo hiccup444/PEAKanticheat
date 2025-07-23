@@ -49,6 +49,7 @@ namespace AntiCheatMod
             {"SETTING_BLOCK", "Block"},
             {"SETTING_AUTOKICK_BLOCKED_PLAYERS", "Autokick Blocked Players"},
             {"SETTING_AUTOBLOCK_NO_ANTICHEAT", "Autoblock No Anticheat"},
+            {"SETTING_ADVANCED_MOD_DETECTION", "Advanced Mod Detection"},
             
             // Buttons
             {"BUTTON_ALL_BLOCK", "All Block"},
@@ -63,7 +64,11 @@ namespace AntiCheatMod
             {"PLAYER_ACTOR_NUMBER", "#{0}"},
             
             // Messages
-            {"MESSAGE_MANUAL_BLOCK", "Manual block from UI"}
+            {"MESSAGE_MANUAL_BLOCK", "Manual block from UI"},
+            {"MESSAGE_NO_ANTICHEAT", "No Anticheat installed - can't fetch mods"},
+            {"MESSAGE_MODS_TITLE", "Installed Mods:"},
+            {"MESSAGE_NO_MODS", "No mods detected"},
+            {"MESSAGE_OPTED_OUT", "{0} opted out of advanced mod sharing"}
         };
 
         public static void Initialize(ConfigEntry<string> languageConfig = null)
@@ -108,6 +113,14 @@ namespace AntiCheatMod
 
                 // Try to detect language from system or use first available
                 string selectedLanguage = DetectLanguage(translationFiles);
+                
+                // If "en" is selected, don't load any file (use defaults)
+                if (selectedLanguage == "en")
+                {
+                    _currentLanguage = "en";
+                    Debug.Log("[TranslationManager] Using English defaults (no translation file loaded)");
+                    return;
+                }
                 
                 foreach (string file in translationFiles)
                 {
@@ -171,12 +184,18 @@ namespace AntiCheatMod
                 }
             }
 
-            if (availableLanguages.Count == 0) return "en";
-
             // Check if a specific language is configured
             if (_languageConfig != null && !string.IsNullOrEmpty(_languageConfig.Value))
             {
                 string configuredLanguage = _languageConfig.Value.ToLower().Trim();
+                
+                // If "en" is configured, use English defaults (no file loading)
+                if (configuredLanguage == "en")
+                {
+                    return "en";
+                }
+                
+                // Check if the configured language has a translation file
                 if (availableLanguages.Contains(configuredLanguage))
                 {
                     return configuredLanguage;
@@ -210,8 +229,8 @@ namespace AntiCheatMod
             if (systemLanguage.Contains("chinese") && availableLanguages.Contains("zh"))
                 return "zh";
 
-            // Default to first available language or English
-            return availableLanguages.FirstOrDefault() ?? "en";
+            // Default to English if no translation files available, otherwise first available language
+            return availableLanguages.Count > 0 ? availableLanguages.FirstOrDefault() : "en";
         }
 
         private static void LoadTranslationFile(string filePath)

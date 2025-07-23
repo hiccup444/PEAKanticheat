@@ -25,6 +25,13 @@ namespace AntiCheatMod
         private List<BlockEntry> _blockedPlayers = new List<BlockEntry>();
         private bool _autoKickBlockedPlayers = false;
         private bool _autoBlockNoAnticheat = false;
+        private bool _advancedModDetection = false;
+        
+        // Secondary window state
+        private bool _secondaryWindowVisible = false;
+        private static Rect _secondaryWindowRect = new Rect(400, 300, 400, 300);
+        private PlayerInfo _selectedPlayer = null;
+        private Vector2 _secondaryWindowScrollPosition = Vector2.zero;
 
         // Config entries for saving UI settings
         private static ConfigEntry<string> _uiGroupSlidersConfig;
@@ -33,6 +40,7 @@ namespace AntiCheatMod
         private static ConfigEntry<bool> _uiAutoBlockNoAnticheatConfig;
         private static ConfigEntry<string> _uiWindowPositionConfig;
         private static ConfigEntry<string> _uiLanguageConfig;
+        private static ConfigEntry<bool> _uiAdvancedModDetectionConfig;
 
         private void Start()
         {
@@ -87,7 +95,8 @@ namespace AntiCheatMod
             _uiAutoKickConfig = AntiCheatPlugin.Config.Bind("UI", "AutoKickBlockedPlayers", false, "Auto-kick blocked players setting");
             _uiAutoBlockNoAnticheatConfig = AntiCheatPlugin.Config.Bind("UI", "AutoBlockNoAnticheat", false, "Auto-block no anticheat setting");
             _uiWindowPositionConfig = AntiCheatPlugin.Config.Bind("UI", "WindowPosition", "200,200,1240,600", "UI window position and size");
-            _uiLanguageConfig = AntiCheatPlugin.Config.Bind("UI", "Language", "", "Language code for UI translations (e.g., 'es' for Spanish, 'fr' for French). Leave empty for auto-detection.");
+            _uiLanguageConfig = AntiCheatPlugin.Config.Bind("UI", "Language", "en", "Language code for UI translations (e.g., 'en' for English, 'es' for Spanish, 'fr' for French).");
+            _uiAdvancedModDetectionConfig = AntiCheatPlugin.Config.Bind("UI", "AdvancedModDetection", false, "Enable advanced mod detection features (clickable player names)");
         }
 
         private void LoadUISettings()
@@ -126,6 +135,9 @@ namespace AntiCheatMod
                 // Load auto-block no anticheat setting
                 _autoBlockNoAnticheat = _uiAutoBlockNoAnticheatConfig.Value;
                 AntiCheatPlugin.AutoBlockNoAnticheat = _autoBlockNoAnticheat;
+
+                // Load advanced mod detection setting
+                _advancedModDetection = _uiAdvancedModDetectionConfig.Value;
 
                 // Load window position
                 string windowPosStr = _uiWindowPositionConfig.Value;
@@ -394,6 +406,9 @@ namespace AntiCheatMod
                 // Hide cursor when UI closes
                 Cursor.visible = false;
                 Cursor.lockState = CursorLockMode.Locked;
+                // Close secondary window when main UI closes
+                _secondaryWindowVisible = false;
+                _selectedPlayer = null;
             }
         }
 
@@ -402,7 +417,13 @@ namespace AntiCheatMod
             if (!_uiVisible || !PhotonNetwork.IsMasterClient)
                 return;
 
-            // Create the main window
+            // Always render the secondary window first (invisible when not needed)
+            if (_selectedPlayer != null)
+            {
+                _secondaryWindowRect = GUI.Window(999, _secondaryWindowRect, DrawSecondaryWindow, $"Player: {_selectedPlayer.PhotonName}");
+            }
+            
+            // Create the main window last (drawn on top)
             _windowRect = GUI.Window(0, _windowRect, DrawWindow, $"{TranslationManager.GetTranslation("UI_WINDOW_TITLE")} [{_toggleKey}]");
         }
 
@@ -453,6 +474,16 @@ namespace AntiCheatMod
             }
             GUILayout.EndHorizontal();
 
+            // Advanced Mod Detection checkbox
+            GUILayout.BeginHorizontal();
+            bool newAdvancedModDetectionValue = GUILayout.Toggle(_advancedModDetection, TranslationManager.GetTranslation("SETTING_ADVANCED_MOD_DETECTION"));
+            if (newAdvancedModDetectionValue != _advancedModDetection)
+            {
+                _advancedModDetection = newAdvancedModDetectionValue;
+                SaveUISettings(); // Save the new setting
+            }
+            GUILayout.EndHorizontal();
+
             // Add the three buttons
             GUILayout.BeginHorizontal();
             if (GUILayout.Button(TranslationManager.GetTranslation("BUTTON_ALL_BLOCK"), GUILayout.Width(100)))
@@ -490,7 +521,39 @@ namespace AntiCheatMod
                 {
                     displayText = $"{player.PhotonName} {TranslationManager.GetTranslation("PLAYER_ACTOR_NUMBER", player.ActorNumber)}";
                 }
-                GUILayout.Label(displayText, GUILayout.Width(280)); // Increased from 240 to 280
+                // Make player name clickable only if advanced mod detection is enabled
+                if (_advancedModDetection)
+                {
+                    if (GUILayout.Button(displayText, GUILayout.Width(280)))
+                    {
+                        Debug.Log($"[AntiCheatUI] Player button clicked: {player.PhotonName} (Actor: {player.ActorNumber})");
+                        Debug.Log($"[AntiCheatUI] Current selected player: {(_selectedPlayer?.PhotonName ?? "null")} (Actor: {_selectedPlayer?.ActorNumber ?? -1})");
+                        Debug.Log($"[AntiCheatUI] Secondary window visible: {_secondaryWindowVisible}");
+                        
+                        // If clicking the same player, re-instance the window (force on top)
+                        if (_selectedPlayer != null && _selectedPlayer.ActorNumber == player.ActorNumber)
+                        {
+                            Debug.Log($"[AntiCheatUI] Same player clicked - re-instancing window");
+                            _secondaryWindowVisible = false; // Close first
+                            _selectedPlayer = null; // Clear the player to force complete re-instance
+                            StartCoroutine(ReopenWindowAfterFrame(player)); // Re-open after a frame
+                            Debug.Log($"[AntiCheatUI] Window closed, will reopen after frame");
+                        }
+                        else
+                        {
+                            Debug.Log($"[AntiCheatUI] Different player clicked - switching windows");
+                            // If clicking a different player, close current and open new
+                            _secondaryWindowVisible = false; // Close current window
+                            _selectedPlayer = null; // Clear current player
+                            StartCoroutine(ReopenWindowAfterFrame(player)); // Re-open with new player
+                            Debug.Log($"[AntiCheatUI] Window closed, will reopen with new player after frame");
+                        }
+                    }
+                }
+                else
+                {
+                    GUILayout.Label(displayText, GUILayout.Width(280));
+                }
                 bool isBlocked = BlockingManager.IsBlocked(player.ActorNumber);
                 string buttonText = isBlocked ? TranslationManager.GetTranslation("BUTTON_UNBLOCK") : TranslationManager.GetTranslation("BUTTON_BLOCK");
                 if (GUILayout.Button(buttonText, GUILayout.Width(60)))
@@ -549,6 +612,79 @@ namespace AntiCheatMod
 
             // Save window position when dragged
             GUI.DragWindow(new Rect(0, 0, _windowRect.width, 20));
+        }
+
+        private void DrawSecondaryWindow(int windowID)
+        {
+            // Only show content if the window is supposed to be visible
+            if (!_secondaryWindowVisible)
+            {
+                Debug.Log($"[AntiCheatUI] DrawSecondaryWindow called but window not visible. Selected player: {_selectedPlayer?.PhotonName ?? "null"}");
+                return;
+            }
+            
+            Debug.Log($"[AntiCheatUI] Drawing secondary window for player: {_selectedPlayer?.PhotonName ?? "null"}");
+
+            // Draw solid background
+            GUI.backgroundColor = new Color(0.2f, 0.2f, 0.2f, 0.95f);
+            GUI.Box(new Rect(0, 0, _secondaryWindowRect.width, _secondaryWindowRect.height), "");
+            GUI.backgroundColor = Color.white;
+
+            // Close button at top right
+            if (GUI.Button(new Rect(_secondaryWindowRect.width - 25, 5, 20, 20), "X"))
+            {
+                _secondaryWindowVisible = false;
+                _selectedPlayer = null;
+                return;
+            }
+
+            // Content area
+            GUILayout.BeginArea(new Rect(10, 30, _secondaryWindowRect.width - 20, _secondaryWindowRect.height - 40));
+            
+            GUILayout.Label($"Player: {_selectedPlayer.PhotonName}");
+            GUILayout.Label($"Actor Number: {_selectedPlayer.ActorNumber}");
+            GUILayout.Label($"Status: {_selectedPlayer.Status}");
+            
+            // Check if player has anticheat installed
+            if (AntiCheatPlugin.HasAnticheat(_selectedPlayer.ActorNumber))
+            {
+                // Check if player has opted out of mod sharing
+                if (AntiCheatPlugin.HasPlayerOptedOutOfModSharing(_selectedPlayer.ActorNumber))
+                {
+                    GUILayout.Space(10);
+                    GUILayout.Label(TranslationManager.GetTranslation("MESSAGE_OPTED_OUT", _selectedPlayer.PhotonName));
+                }
+                else
+                {
+                    GUILayout.Space(10);
+                    GUILayout.Label(TranslationManager.GetTranslation("MESSAGE_MODS_TITLE"), GUILayout.Width(380));
+                    
+                    string[] mods = AntiCheatPlugin.GetPlayerModList(_selectedPlayer.ActorNumber);
+                    if (mods.Length > 0)
+                    {
+                        _secondaryWindowScrollPosition = GUILayout.BeginScrollView(_secondaryWindowScrollPosition, GUILayout.Height(200));
+                        foreach (string mod in mods)
+                        {
+                            GUILayout.Label($"• {mod}");
+                        }
+                        GUILayout.EndScrollView();
+                    }
+                    else
+                    {
+                        GUILayout.Label(TranslationManager.GetTranslation("MESSAGE_NO_MODS"));
+                    }
+                }
+            }
+            else
+            {
+                GUILayout.Space(10);
+                GUILayout.Label(TranslationManager.GetTranslation("MESSAGE_NO_ANTICHEAT"));
+            }
+            
+            GUILayout.EndArea();
+
+            // Make window draggable
+            GUI.DragWindow(new Rect(0, 0, _secondaryWindowRect.width, 20));
         }
 
         private void SetAllSliders(int value)
@@ -740,6 +876,14 @@ namespace AntiCheatMod
         private void OnApplicationQuit()
         {
             SaveUISettings();
+        }
+
+        private System.Collections.IEnumerator ReopenWindowAfterFrame(PlayerInfo player)
+        {
+            yield return null; // Wait one frame
+            _selectedPlayer = player;
+            _secondaryWindowVisible = true;
+            Debug.Log($"[AntiCheatUI] Window reopened after frame. Visible: {_secondaryWindowVisible}");
         }
 
         private void OnDestroy()
