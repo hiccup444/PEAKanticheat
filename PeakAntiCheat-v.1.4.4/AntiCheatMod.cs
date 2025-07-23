@@ -20,7 +20,7 @@ using System.Linq;
 
 namespace AntiCheatMod
 {
-    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.4.4")]
+    [BepInPlugin("com.hiccup444.anticheat", "PEAK Anticheat", "1.4.5")]
     public class AntiCheatPlugin : BaseUnityPlugin, IConnectionCallbacks, IMatchmakingCallbacks, IInRoomCallbacks, IOnEventCallback
     {
         public static new ManualLogSource Logger;
@@ -39,7 +39,7 @@ namespace AntiCheatMod
         private static readonly Dictionary<int, GameObject> _blockedPlayerHeldItems = new Dictionary<int, GameObject>();
 
         // Plugin version
-        private const string PLUGIN_VERSION = "1.4.4";
+        private const string PLUGIN_VERSION = "1.4.5";
 
         // Custom event code for anticheat communication
         private const byte ANTICHEAT_PING_EVENT = 69;
@@ -107,7 +107,7 @@ namespace AntiCheatMod
             Logger = base.Logger;
 
             // Initialize config
-            Config = new ConfigFile(Path.Combine(Paths.ConfigPath, "com.hiccup444.PEAKanticheat.cfg"), true);
+            Config = new ConfigFile(Path.Combine(Paths.ConfigPath, "com.hiccup444.anticheat.cfg"), true);
             ShowVisualLogs = Config.Bind("General", "ShowVisualLogs", true, "Show anti-cheat messages in the connection log");
             CheckSteamNames = Config.Bind("General", "CheckSteamNames", true, "Check if Photon names match Steam names");
             AutoBlockCheaters = Config.Bind("General", "AutoBlockCheaters", true, "Automatically block all RPCs from detected cheaters");

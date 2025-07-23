@@ -15,7 +15,7 @@ namespace AntiCheatMod
         private bool _uiVisible = false;
         private static KeyCode _toggleKey = KeyCode.F2; // Default to F2
         private int _updateCounter = 0;
-        private static Rect _windowRect = new Rect(200, 200, 1240, 600);
+        private static Rect _windowRect = new Rect(200, 200, 1280, 600);
         
         // UI state
         private Vector2 _scrollPosition = Vector2.zero;
@@ -32,11 +32,15 @@ namespace AntiCheatMod
         private static ConfigEntry<bool> _uiAutoKickConfig;
         private static ConfigEntry<bool> _uiAutoBlockNoAnticheatConfig;
         private static ConfigEntry<string> _uiWindowPositionConfig;
+        private static ConfigEntry<string> _uiLanguageConfig;
 
         private void Start()
         {
             // Initialize config entries for UI settings
             InitializeConfigEntries();
+            
+            // Initialize translation system with language config
+            TranslationManager.Initialize(_uiLanguageConfig);
             
             // Initialize group sliders with defaults (will be overridden by loaded settings)
             _groupSliders["ModDetection"] = 2; // Default to Block
@@ -83,6 +87,7 @@ namespace AntiCheatMod
             _uiAutoKickConfig = AntiCheatPlugin.Config.Bind("UI", "AutoKickBlockedPlayers", false, "Auto-kick blocked players setting");
             _uiAutoBlockNoAnticheatConfig = AntiCheatPlugin.Config.Bind("UI", "AutoBlockNoAnticheat", false, "Auto-block no anticheat setting");
             _uiWindowPositionConfig = AntiCheatPlugin.Config.Bind("UI", "WindowPosition", "200,200,1240,600", "UI window position and size");
+            _uiLanguageConfig = AntiCheatPlugin.Config.Bind("UI", "Language", "", "Language code for UI translations (e.g., 'es' for Spanish, 'fr' for French). Leave empty for auto-detection.");
         }
 
         private void LoadUISettings()
@@ -134,6 +139,9 @@ namespace AntiCheatMod
                         _windowRect = new Rect(x, y, width, height);
                     }
                 }
+                
+                // Update translation manager with current language config
+                TranslationManager.UpdateLanguageConfig(_uiLanguageConfig);
                 
                 // Apply loaded settings to DetectionManager
                 ApplyLoadedSettings();
@@ -395,7 +403,7 @@ namespace AntiCheatMod
                 return;
 
             // Create the main window
-            _windowRect = GUI.Window(0, _windowRect, DrawWindow, $"PEAK AntiCheat [{_toggleKey}]");
+            _windowRect = GUI.Window(0, _windowRect, DrawWindow, $"{TranslationManager.GetTranslation("UI_WINDOW_TITLE")} [{_toggleKey}]");
         }
 
         private void DrawWindow(int windowID)
@@ -403,14 +411,14 @@ namespace AntiCheatMod
             GUILayout.BeginHorizontal();
 
             // --- Left: Detections ---
-            GUILayout.BeginVertical(GUILayout.Width(320));
-            GUILayout.Box("Detections", GUILayout.Width(320), GUILayout.Height(30));
+            GUILayout.BeginVertical(GUILayout.Width(360));
+            GUILayout.Box(TranslationManager.GetTranslation("UI_DETECTIONS"), GUILayout.Width(360), GUILayout.Height(30));
             _scrollPosition = GUILayout.BeginScrollView(_scrollPosition, GUILayout.Height(420)); // Reduced height to make room for buttons
 
             // Mod Detection (Cherry + Atlas)
-            DrawGroupSlider("ModDetection", "Cheat Detection");
+            DrawGroupSlider("ModDetection", TranslationManager.GetTranslation("DETECTION_CHEAT_DETECTION"));
             // Spoofed Names (all name spoofing)
-            DrawGroupSlider("SpoofedNames", "Spoofed Names");
+            DrawGroupSlider("SpoofedNames", TranslationManager.GetTranslation("DETECTION_SPOOFED_NAMES"));
 
             // All other detections as individual sliders
             foreach (DetectionType type in System.Enum.GetValues(typeof(DetectionType)))
@@ -425,7 +433,7 @@ namespace AntiCheatMod
 
             // Auto Kick checkbox
             GUILayout.BeginHorizontal();
-            bool newAutoKickValue = GUILayout.Toggle(_autoKickBlockedPlayers, "Autokick Blocked Players");
+            bool newAutoKickValue = GUILayout.Toggle(_autoKickBlockedPlayers, TranslationManager.GetTranslation("SETTING_AUTOKICK_BLOCKED_PLAYERS"));
             if (newAutoKickValue != _autoKickBlockedPlayers)
             {
                 _autoKickBlockedPlayers = newAutoKickValue;
@@ -436,7 +444,7 @@ namespace AntiCheatMod
 
             // Auto Block No Anticheat checkbox
             GUILayout.BeginHorizontal();
-            bool newAutoBlockNoAnticheatValue = GUILayout.Toggle(_autoBlockNoAnticheat, "Autoblock No Anticheat");
+            bool newAutoBlockNoAnticheatValue = GUILayout.Toggle(_autoBlockNoAnticheat, TranslationManager.GetTranslation("SETTING_AUTOBLOCK_NO_ANTICHEAT"));
             if (newAutoBlockNoAnticheatValue != _autoBlockNoAnticheat)
             {
                 _autoBlockNoAnticheat = newAutoBlockNoAnticheatValue;
@@ -447,15 +455,15 @@ namespace AntiCheatMod
 
             // Add the three buttons
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("All Block", GUILayout.Width(100)))
+            if (GUILayout.Button(TranslationManager.GetTranslation("BUTTON_ALL_BLOCK"), GUILayout.Width(100)))
             {
                 SetAllSliders(2);
             }
-            if (GUILayout.Button("All Warn", GUILayout.Width(100)))
+            if (GUILayout.Button(TranslationManager.GetTranslation("BUTTON_ALL_WARN"), GUILayout.Width(100)))
             {
                 SetAllSliders(1);
             }
-            if (GUILayout.Button("All Off", GUILayout.Width(100)))
+            if (GUILayout.Button(TranslationManager.GetTranslation("BUTTON_ALL_OFF"), GUILayout.Width(100)))
             {
                 SetAllSliders(0);
             }
@@ -468,7 +476,7 @@ namespace AntiCheatMod
 
             // --- Middle: Player List ---
             GUILayout.BeginVertical(GUILayout.Width(440)); // Increased from 360 to 440
-            GUILayout.Box("Players", GUILayout.Width(440), GUILayout.Height(30));
+            GUILayout.Box(TranslationManager.GetTranslation("UI_PLAYERS"), GUILayout.Width(440), GUILayout.Height(30));
             var playerScroll = GUILayout.BeginScrollView(Vector2.zero, GUILayout.Height(500));
             foreach (var player in _playerList)
             {
@@ -476,15 +484,15 @@ namespace AntiCheatMod
                 string displayText;
                 if (player.Status == PlayerStatus.MasterClient)
                 {
-                    displayText = $"{player.PhotonName} (MasterClient)";
+                    displayText = $"{player.PhotonName} ({TranslationManager.GetTranslation("PLAYER_MASTER_CLIENT")})";
                 }
                 else
                 {
-                    displayText = $"{player.PhotonName} #{player.ActorNumber}";
+                    displayText = $"{player.PhotonName} {TranslationManager.GetTranslation("PLAYER_ACTOR_NUMBER", player.ActorNumber)}";
                 }
                 GUILayout.Label(displayText, GUILayout.Width(280)); // Increased from 240 to 280
                 bool isBlocked = BlockingManager.IsBlocked(player.ActorNumber);
-                string buttonText = isBlocked ? "Unblock" : "Block";
+                string buttonText = isBlocked ? TranslationManager.GetTranslation("BUTTON_UNBLOCK") : TranslationManager.GetTranslation("BUTTON_BLOCK");
                 if (GUILayout.Button(buttonText, GUILayout.Width(60)))
                 {
                     if (isBlocked)
@@ -497,7 +505,7 @@ namespace AntiCheatMod
                         var photonPlayer = PhotonNetwork.CurrentRoom?.GetPlayer(player.ActorNumber);
                         if (photonPlayer != null)
                         {
-                            BlockingManager.BlockPlayer(photonPlayer, "Manual block from UI", BlockReason.Manual);
+                            BlockingManager.BlockPlayer(photonPlayer, TranslationManager.GetTranslation("MESSAGE_MANUAL_BLOCK"), BlockReason.Manual);
                             AntiCheatPlugin.BroadcastBlockListUpdate(player.ActorNumber, true);
                         }
                     }
@@ -506,7 +514,7 @@ namespace AntiCheatMod
                 // Show Kick button only for players with anticheat installed (and not for master client)
                 if (player.Status != PlayerStatus.MasterClient && AntiCheatPlugin.HasAnticheat(player.ActorNumber))
                 {
-                    if (GUILayout.Button("Kick", GUILayout.Width(50)))
+                    if (GUILayout.Button(TranslationManager.GetTranslation("BUTTON_KICK"), GUILayout.Width(50)))
                     {
                         AntiCheatPlugin.KickPlayer(player.ActorNumber);
                     }
@@ -521,13 +529,13 @@ namespace AntiCheatMod
 
             // --- Right: Blocked Players ---
             GUILayout.BeginVertical(GUILayout.Width(380)); // Reduced from 420 to 380
-            GUILayout.Box("Blocked Players", GUILayout.Width(380), GUILayout.Height(30));
+            GUILayout.Box(TranslationManager.GetTranslation("UI_BLOCKED_PLAYERS"), GUILayout.Width(380), GUILayout.Height(30));
             var blockedScroll = GUILayout.BeginScrollView(Vector2.zero, GUILayout.Height(500));
             foreach (var blockEntry in _blockedPlayers)
             {
                 GUILayout.BeginHorizontal();
                 GUILayout.Label($"{blockEntry.PlayerName} - {blockEntry.SpecificReason}", GUILayout.Width(300)); // Adjusted to fit new column width
-                if (GUILayout.Button("Unblock", GUILayout.Width(60)))
+                if (GUILayout.Button(TranslationManager.GetTranslation("BUTTON_UNBLOCK"), GUILayout.Width(60)))
                 {
                     BlockingManager.UnblockPlayer(blockEntry.ActorNumber);
                     AntiCheatPlugin.BroadcastBlockListUpdate(blockEntry.ActorNumber, false);
@@ -600,8 +608,8 @@ namespace AntiCheatMod
                 AntiCheatPlugin.BroadcastDetectionSettingsUpdate();
                 SaveUISettings(); // Save the new setting
             }
-            string settingText = newValue == 0 ? "Off" : newValue == 1 ? "Warn" : "Block";
-            GUILayout.Label(settingText, GUILayout.Width(40));
+            string settingText = newValue == 0 ? TranslationManager.GetTranslation("SETTING_OFF") : newValue == 1 ? TranslationManager.GetTranslation("SETTING_WARN") : TranslationManager.GetTranslation("SETTING_BLOCK");
+            GUILayout.Label(settingText, GUILayout.Width(80));
             GUILayout.EndHorizontal();
         }
 
@@ -621,8 +629,8 @@ namespace AntiCheatMod
                 AntiCheatPlugin.BroadcastDetectionSettingsUpdate();
                 SaveUISettings(); // Save the new setting
             }
-            string settingText = newValue == 0 ? "Off" : newValue == 1 ? "Warn" : "Block";
-            GUILayout.Label(settingText, GUILayout.Width(40));
+            string settingText = newValue == 0 ? TranslationManager.GetTranslation("SETTING_OFF") : newValue == 1 ? TranslationManager.GetTranslation("SETTING_WARN") : TranslationManager.GetTranslation("SETTING_BLOCK");
+            GUILayout.Label(settingText, GUILayout.Width(80));
             GUILayout.EndHorizontal();
         }
 
@@ -630,22 +638,22 @@ namespace AntiCheatMod
         {
             switch (type)
             {
-                case DetectionType.OwnershipTheft: return "Ownership Theft";
-                case DetectionType.UnauthorizedDestroy: return "Unauthorized Destroy";
-                case DetectionType.RateLimitExceeded: return "Rate Limit Exceeded";
-                case DetectionType.UnauthorizedKill: return "Unauthorized Kill";
-                case DetectionType.UnauthorizedRevive: return "Unauthorized Revive";
-                case DetectionType.UnauthorizedWarp: return "Unauthorized Warp";
-                case DetectionType.UnauthorizedStatusEffect: return "Unauthorized Status Effect";
-                case DetectionType.UnauthorizedMovement: return "Unauthorized Movement";
-                case DetectionType.UnauthorizedEmote: return "Unauthorized Emote";
-                case DetectionType.UnauthorizedItemDrop: return "Unauthorized Item Drop";
-                case DetectionType.UnauthorizedCampfireModification: return "Unauthorized Campfire";
-                case DetectionType.UnauthorizedFlareLighting: return "Unauthorized Flare";
-                case DetectionType.UnauthorizedBananaSlip: return "Unauthorized Banana";
-                case DetectionType.MasterClientTheft: return "Master Client Theft";
-                case DetectionType.SteamIDSpoofing: return "Steam ID Spoofing";
-                case DetectionType.InfinityWarp: return "Infinity Warp";
+                case DetectionType.OwnershipTheft: return TranslationManager.GetTranslation("DETECTION_OWNERSHIP_THEFT");
+                case DetectionType.UnauthorizedDestroy: return TranslationManager.GetTranslation("DETECTION_UNAUTHORIZED_DESTROY");
+                case DetectionType.RateLimitExceeded: return TranslationManager.GetTranslation("DETECTION_RATE_LIMIT_EXCEEDED");
+                case DetectionType.UnauthorizedKill: return TranslationManager.GetTranslation("DETECTION_UNAUTHORIZED_KILL");
+                case DetectionType.UnauthorizedRevive: return TranslationManager.GetTranslation("DETECTION_UNAUTHORIZED_REVIVE");
+                case DetectionType.UnauthorizedWarp: return TranslationManager.GetTranslation("DETECTION_UNAUTHORIZED_WARP");
+                case DetectionType.UnauthorizedStatusEffect: return TranslationManager.GetTranslation("DETECTION_UNAUTHORIZED_STATUS_EFFECT");
+                case DetectionType.UnauthorizedMovement: return TranslationManager.GetTranslation("DETECTION_UNAUTHORIZED_MOVEMENT");
+                case DetectionType.UnauthorizedEmote: return TranslationManager.GetTranslation("DETECTION_UNAUTHORIZED_EMOTE");
+                case DetectionType.UnauthorizedItemDrop: return TranslationManager.GetTranslation("DETECTION_UNAUTHORIZED_ITEM_DROP");
+                case DetectionType.UnauthorizedCampfireModification: return TranslationManager.GetTranslation("DETECTION_UNAUTHORIZED_CAMPFIRE");
+                case DetectionType.UnauthorizedFlareLighting: return TranslationManager.GetTranslation("DETECTION_UNAUTHORIZED_FLARE");
+                case DetectionType.UnauthorizedBananaSlip: return TranslationManager.GetTranslation("DETECTION_UNAUTHORIZED_BANANA");
+                case DetectionType.MasterClientTheft: return TranslationManager.GetTranslation("DETECTION_MASTER_CLIENT_THEFT");
+                case DetectionType.SteamIDSpoofing: return TranslationManager.GetTranslation("DETECTION_STEAM_ID_SPOOFING");
+                case DetectionType.InfinityWarp: return TranslationManager.GetTranslation("DETECTION_INFINITY_WARP");
                 default: return type.ToString();
             }
         }
