@@ -1,0 +1,57 @@
+# Spanish Translation File for PEAK AntiCheat
+# Format: KEY=VALUE
+# Lines starting with # are comments and will be ignored
+
+# Window and sections
+UI_WINDOW_TITLE=PEAK AntiCheat
+UI_DETECTIONS=Detecciones
+UI_PLAYERS=Jugadores
+UI_BLOCKED_PLAYERS=Jugadores Bloqueados
+
+# Detection types
+DETECTION_CHEAT_DETECTION=Detección de Trampas
+DETECTION_SPOOFED_NAMES=Nombres Falsificados
+DETECTION_OWNERSHIP_THEFT=Robo de Propiedad
+DETECTION_UNAUTHORIZED_DESTROY=Destrucción No Autorizada
+DETECTION_RATE_LIMIT_EXCEEDED=Límite de Velocidad Excedido
+DETECTION_UNAUTHORIZED_KILL=Muerte No Autorizada
+DETECTION_UNAUTHORIZED_REVIVE=Resurrección No Autorizada
+DETECTION_UNAUTHORIZED_WARP=Teletransporte No Autorizado
+DETECTION_UNAUTHORIZED_STATUS_EFFECT=Efecto de Estado No Autorizado
+DETECTION_UNAUTHORIZED_MOVEMENT=Movimiento No Autorizado
+DETECTION_UNAUTHORIZED_EMOTE=Emote No Autorizado
+DETECTION_UNAUTHORIZED_ITEM_DROP=Caída de Objeto No Autorizada
+DETECTION_UNAUTHORIZED_CAMPFIRE=Fogata No Autorizada
+DETECTION_UNAUTHORIZED_FLARE=Bengala No Autorizada
+DETECTION_UNAUTHORIZED_BANANA=Plátano No Autorizado
+DETECTION_MASTER_CLIENT_THEFT=Robo de Cliente Maestro
+DETECTION_STEAM_ID_SPOOFING=Falsificación de Steam ID
+DETECTION_INFINITY_WARP=Teletransporte Infinito
+DETECTION_PREFAB_DETECTION=Detección de Prefabs
+DETECTION_ITEM_SPAWNING=Generación de Objetos
+
+# Settings
+SETTING_OFF=Desactivado
+SETTING_WARN=Advertencia
+SETTING_BLOCK=Bloquear
+SETTING_AUTOKICK_BLOCKED_PLAYERS=Expulsar Automáticamente Jugadores Bloqueados
+SETTING_AUTOBLOCK_NO_ANTICHEAT=Bloquear Automáticamente Sin Anticheat
+SETTING_ADVANCED_MOD_DETECTION=Detección Avanzada de Mods
+
+# Buttons
+BUTTON_ALL_BLOCK=Todo Bloquear
+BUTTON_ALL_WARN=Todo Advertencia
+BUTTON_ALL_OFF=Todo Desactivado
+BUTTON_BLOCK=Bloquear
+BUTTON_UNBLOCK=Desbloquear
+BUTTON_KICK=Expulsar
+
+# Player status
+PLAYER_MASTER_CLIENT=Cliente Maestro
+PLAYER_ACTOR_NUMBER=Actor #{0}
+
+# Messages
+MESSAGE_MANUAL_BLOCK=Bloqueo manual desde UI
+MESSAGE_NO_ANTICHEAT=No Anticheat instalado - no se pueden obtener mods
+MESSAGE_MODS_TITLE=Mods Instalados:
+MESSAGE_NO_MODS=No se detectaron mods 
